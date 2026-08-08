@@ -3,4 +3,7 @@ dist/
 public/assets/map/city-preview.png
 tools/city-preview.png
 tools/smoke.png
+tools/smoke3d.png
+tools/edge.png
+tools/preview.pid
 *.log

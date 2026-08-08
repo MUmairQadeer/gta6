@@ -1,0 +1,6 @@
+node_modules/
+dist/
+public/assets/map/city-preview.png
+tools/city-preview.png
+tools/smoke.png
+*.log

@@ -1,5 +1,6 @@
 import Phaser from 'phaser'
 import { Car, makeCarTextures, makePoliceTexture } from './Car.js'
+import { makeRoadOverlay } from './road.js'
 import { makeCharacterTexture } from './character.js'
 import { PED_SHIRTS, Pedestrian, respawnPedestrian } from './Pedestrian.js'
 import { Police } from './Police.js'
@@ -104,6 +105,8 @@ makeCharacterTexture(this, 'player')
     this.physics.add.collider(this.carSprites, this.buildings)
     this.physics.add.collider(this.player, this.carSprites)
     this.physics.add.collider(this.carSprites, this.carSprites, (a, b) => this.carCrash(a, b), undefined, this)
+
+    this.roadOverlay = makeRoadOverlay(this)
 
     this.cacheTileColl()
     this.setupPedestrians()
@@ -286,7 +289,8 @@ makeCharacterTexture(this, 'player')
       this.missionMarker,
       this.pedGroup ? this.pedGroup.getChildren() : [],
       this.carSprites,
-      ...this.cops.flatMap((c) => [c.sprite, c.car.sprite])
+      ...this.cops.flatMap((c) => [c.sprite, c.car.sprite]),
+      ...(this.roadOverlay ? this.roadOverlay.getChildren() : [])
     ]
     const hud = [
       this.enterPrompt,

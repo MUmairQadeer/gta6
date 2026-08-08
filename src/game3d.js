@@ -11,13 +11,16 @@ const DRIVE = {
   OFFROAD_FACTOR: 0.72,
   ACCEL: 430,
   ACCEL_CURVE: 1.25,
-  BRAKE: 590,
+  BRAKE: 460,
   REVERSE_ACCEL: 150,
-  COAST_ROAD: 0.45,
-  COAST_OFFROAD: 2.6,
-  STEER: 2.4,
+  COAST_ROAD: 0.4,
+  COAST_OFFROAD: 2.4,
+  STEER: 1.9,
   STEER_RESPONSE: 4.0,
-  MIN_STEER_SPEED: 8
+  YAW_RESPONSE: 5.0,
+  GRIP_LOW: 2.4,
+  GRIP_HIGH: 5.2,
+  MIN_STEER_SPEED: 10
 }
 const ENTER_RADIUS = 48
 const CATCH_RADIUS = 66
@@ -46,11 +49,12 @@ let mapW = 0
 let mapH = 0
 
 const player = { x: 0, y: 0, r: 0, mesh: null, moving: false }
-const car = { inCar: false, speed: 0, r: 0, x: 0, y: 0, mesh: null, cur: null, _steer: 0 }
+const car = { inCar: false, speed: 0, r: 0, x: 0, y: 0, mesh: null, cur: null, _steer: 0, _yaw: 0, _sgn: 1, _vdx: 0, _vdy: -1 }
 const peds = []
 const cops = []
 
 const state = {
+  frameNo: 0,
   money: 300,
   wanted: 0,
   wantedTimer: 0,
@@ -65,6 +69,11 @@ const state = {
 
 let minimapCtx = null
 let minimapBg = null
+let camYaw = 0
+let camPitch = 0.55
+let mouseDown = false
+let lastMX = 0
+let lastMY = 0
 let hudTimer = 0
 let miniTimer = 0
 let camTarget = new THREE.Vector3()
@@ -161,7 +170,7 @@ function initHud() {
       <canvas id="hud-mini" width="144" height="144" style="display:block;border-radius:7px"></canvas>
       <div style="font-size:9px;color:#aeb9c4;text-align:center;letter-spacing:2.5px;margin-top:5px">MINIMAP</div>
     </div>
-    <div id="hud-hint" style="position:absolute;bottom:6px;left:50%;transform:translateX(-50%);font-size:12px;color:#d2f0d2;background:rgba(0,0,0,.35);padding:4px 10px;border-radius:6px;white-space:nowrap">WASD walk · E enter/exit · arrows drive · SHIFT sprint · scroll zoom · T night</div>
+    <div id="hud-hint" style="position:absolute;bottom:6px;left:50%;transform:translateX(-50%);font-size:12px;color:#d2f0d2;background:rgba(0,0,0,.35);padding:4px 10px;border-radius:6px;white-space:nowrap">WASD/arrows walk · E enter/exit · drag mouse look · SHIFT sprint · scroll zoom · T night</div>
     <div id="hud-night" style="position:absolute;inset:0;background:rgba(18,26,90,.42);opacity:0;transition:opacity .5s"></div>
     <div id="hud-busted" style="position:absolute;inset:0;background:rgba(0,0,0,.62);display:none;pointer-events:auto;align-items:center;justify-content:center;flex-direction:column">
       <div style="font-size:44px;font-weight:bold;color:#ff5a4a">BUSTED</div>
@@ -456,32 +465,37 @@ function sphGeo(r, x, y, z, sx = 1, sy = 1, sz = 1) {
 let rigGeoCache = null
 function buildRigGeo() {
   if (rigGeoCache) return rigGeoCache
-  const torso = mergeGeometries([
-    boxGeo(2.9, 1.5, 1.9, 0, 0.35, 0),
-    boxGeo(3.6, 3.2, 2.0, 0, 3.05, 0),
-    sphGeo(0.85, -1.95, 3.8, 0),
-    sphGeo(0.85, 1.95, 3.8, 0),
-    boxGeo(0.95, 1.1, 0.95, 0, 4.55, 0),
-    sphGeo(1.9, 0, 5.35, 0),
-    sphGeo(2.05, 0, 5.85, 0, 1.05, 0.55, 1.05),
-    sphGeo(0.18, -0.6, 5.75, -2.05),
-    sphGeo(0.18, 0.6, 5.75, -2.05),
-    boxGeo(0.34, 0.4, 0.42, 0, 5.32, -1.98),
-    sphGeo(0.28, 0, 4.98, -2.12)
-  ])
-  const legL = mergeGeometries([
-    boxGeo(1.6, 3.0, 1.7, 0, -1.55, 0),
-    boxGeo(1.35, 3.0, 1.4, 0, -4.55, 0),
-    boxGeo(1.5, 1.7, 2.4, 0, -6.9, -0.45)
-  ])
-  const legR = legL.clone()
-  const armL = mergeGeometries([
-    boxGeo(1.45, 2.1, 1.5, 0, -1.05, 0),
-    boxGeo(1.3, 1.8, 1.35, 0, -2.7, 0),
-    sphGeo(0.5, 0, -3.7, 0)
-  ])
-  const armR = armL.clone()
-  return (rigGeoCache = { torso, legL, legR, armL, armR })
+  const P = (w2, h2, d2, x, y, z) => new THREE.BoxGeometry(w2, h2, d2).translate(x, y, z)
+  const S = (r, x, y, z, sx = 1, sy = 1, sz = 1) => {
+    const s = new THREE.SphereGeometry(r, 12, 8)
+    s.scale(sx, sy, sz)
+    s.translate(x, y, z)
+    return s
+  }
+  const torso = {
+    belt: P(2.9, 1.5, 1.9, 0, 0.35, 0),
+    shirt: P(3.6, 3.2, 2.0, 0, 3.05, 0),
+    shL: S(0.85, -1.95, 3.8, 0),
+    shR: S(0.85, 1.95, 3.8, 0),
+    neck: P(0.95, 1.1, 0.95, 0, 4.55, 0),
+    head: S(1.9, 0, 5.35, 0),
+    face: S(2.05, 0, 5.85, 0, 1.05, 0.55, 1.05),
+    eyeL: S(0.18, -0.6, 5.75, -2.05),
+    eyeR: S(0.18, 0.6, 5.75, -2.05),
+    nose: P(0.34, 0.4, 0.42, 0, 5.32, -1.98),
+    mouth: S(0.28, 0, 4.98, -2.12)
+  }
+  const legL = {
+    thigh: P(1.6, 3.0, 1.7, 0, -1.55, 0),
+    shin: P(1.35, 3.0, 1.4, 0, -4.55, 0),
+    shoe: P(1.5, 1.7, 2.4, 0, -6.9, -0.45)
+  }
+  const armL = {
+    upper: P(1.45, 2.1, 1.5, 0, -1.05, 0),
+    fore: P(1.3, 1.8, 1.35, 0, -2.7, 0),
+    hand: S(0.5, 0, -3.7, 0)
+  }
+  return (rigGeoCache = { torso, legL, armL })
 }
 
 let rigSkinM = null
@@ -535,29 +549,46 @@ function makePed(shirtColor) {
 
   const torso = new THREE.Group()
   torso.position.y = 7.6
-  torso.add(new THREE.Mesh(geo.torso, [
-    pantsM, shirtM, shirtM, shirtM, skinM, skinM, hairM, darkM, darkM, noseM, mouthM
-  ]))
+  const tp = geo.torso
+  torso.add(new THREE.Mesh(tp.belt, pantsM))
+  torso.add(new THREE.Mesh(tp.shirt, shirtM))
+  torso.add(new THREE.Mesh(tp.shL, skinM))
+  torso.add(new THREE.Mesh(tp.shR, skinM))
+  torso.add(new THREE.Mesh(tp.neck, skinM))
+  torso.add(new THREE.Mesh(tp.head, hairM))
+  torso.add(new THREE.Mesh(tp.face, skinM))
+  torso.add(new THREE.Mesh(tp.eyeL, darkM))
+  torso.add(new THREE.Mesh(tp.eyeR, darkM))
+  torso.add(new THREE.Mesh(tp.nose, noseM))
+  torso.add(new THREE.Mesh(tp.mouth, mouthM))
   g.add(torso)
 
   const legL = new THREE.Group()
   legL.position.set(-1.55, 7.6, 0)
-  legL.add(new THREE.Mesh(geo.legL, [pantsM, pantsM, shoeM]))
+  legL.add(new THREE.Mesh(geo.legL.thigh, pantsM))
+  legL.add(new THREE.Mesh(geo.legL.shin, pantsM))
+  legL.add(new THREE.Mesh(geo.legL.shoe, shoeM))
   g.add(legL)
 
   const legR = new THREE.Group()
   legR.position.set(1.55, 7.6, 0)
-  legR.add(new THREE.Mesh(geo.legR, [pantsM, pantsM, shoeM]))
+  legR.add(new THREE.Mesh(geo.legL.thigh, pantsM))
+  legR.add(new THREE.Mesh(geo.legL.shin, pantsM))
+  legR.add(new THREE.Mesh(geo.legL.shoe, shoeM))
   g.add(legR)
 
   const armL = new THREE.Group()
   armL.position.set(-2.05, 11.0, 0)
-  armL.add(new THREE.Mesh(geo.armL, [shirtM, skinM, skinM]))
+  armL.add(new THREE.Mesh(geo.armL.upper, shirtM))
+  armL.add(new THREE.Mesh(geo.armL.fore, skinM))
+  armL.add(new THREE.Mesh(geo.armL.hand, skinM))
   g.add(armL)
 
   const armR = new THREE.Group()
   armR.position.set(2.05, 11.0, 0)
-  armR.add(new THREE.Mesh(geo.armR, [shirtM, skinM, skinM]))
+  armR.add(new THREE.Mesh(geo.armL.upper, shirtM))
+  armR.add(new THREE.Mesh(geo.armL.fore, skinM))
+  armR.add(new THREE.Mesh(geo.armL.hand, skinM))
   g.add(armR)
 
   if (!rigShadowGeo) rigShadowGeo = new THREE.CircleGeometry(3.9, 18)
@@ -590,7 +621,7 @@ function animatePed(g, moving, speed, dt) {
 // ---------------------------------------------------------------------------
 // city geometry
 // ---------------------------------------------------------------------------
-const GROUND_PX = 8
+const GROUND_PX = 16
 const SW_H = 0.46
 const CURB_W = 1.15
 
@@ -610,9 +641,6 @@ function buildGround() {
     5: [109, 112, 120], 6: [165, 83, 63], 7: [200, 178, 144], 8: [46, 91, 35],
     9: [42, 111, 176], 10: [51, 53, 59], 11: [188, 184, 174], 12: [107, 86, 51], 13: [46, 125, 134]
   }
-  const EDGE = [232, 233, 237]
-  const CENTER = [178, 166, 92]
-  const CROSS = [240, 240, 243]
 
   const set = (x, y, r, g, bl) => {
     if (x < 0 || y < 0 || x >= W || y >= H) return
@@ -669,63 +697,76 @@ function buildGround() {
   // ---- per-tile detail pass ------------------------------------------------
   const gidAt = (gx, gy) =>
     gx < 0 || gy < 0 || gx >= mapW || gy >= mapH ? 0 : groundGids[gy * mapW + gx]
+
+  // toroidal value-noise grids for smooth surfaces (cell divides W/H)
+  const vnHash = (a, b, seed) => {
+    let h = (a * 374761393 + b * 668265263 + seed * 2246822519) | 0
+    h = (h ^ (h >>> 13)) | 0
+    h = Math.imul(h, 1274126177)
+    return ((h ^ (h >>> 16)) >>> 0) / 4294967296
+  }
+  const vnGrids = [64, 16, 4].map((cell) => {
+    const gw = Math.round(W / cell)
+    const gh = Math.round(H / cell)
+    const data = new Float32Array(gw * gh)
+    for (let j = 0; j < gh; j++) {
+      for (let i = 0; i < gw; i++) data[j * gw + i] = vnHash(i, j, cell)
+    }
+    return { cell, gw, gh, data }
+  })
+  const vsample = (g, x, y) => {
+    const c = g.cell
+    const gx0 = Math.floor(x / c)
+    const gy0 = Math.floor(y / c)
+    const fx = (x - gx0 * c) / c
+    const fy = (y - gy0 * c) / c
+    const sx = fx * fx * (3 - 2 * fx)
+    const sy = fy * fy * (3 - 2 * fy)
+    const gx1 = (gx0 + 1) % g.gw
+    const gy1 = (gy0 + 1) % g.gh
+    const i0 = gy0 % g.gh
+    const A = g.data[i0 * g.gw + (gx0 % g.gw)]
+    const B = g.data[i0 * g.gw + gx1]
+    const C = g.data[gy1 * g.gw + (gx0 % g.gw)]
+    const D = g.data[gy1 * g.gw + gx1]
+    return A + (B - A) * sx + (C - A) * sy + (A - B - C + D) * sx * sy
+  }
+  const asphalt = (x, y, base) => {
+    const n =
+      (vsample(vnGrids[0], x, y) - 0.5) * 9 +
+      (vsample(vnGrids[1], x, y) - 0.5) * 5 +
+      (vsample(vnGrids[2], x, y) - 0.5) * 2.5
+    return [
+      Math.max(0, Math.min(255, base + n)),
+      Math.max(0, Math.min(255, base + 3 + n)),
+      Math.max(0, Math.min(255, base + 10 + n))
+    ]
+  }
+  const fillRoad = (x0, y0) => {
+    const base = gidAt(Math.floor(x0 / PX), Math.floor(y0 / PX)) === 4 ? 51 : 47
+    for (let j = 0; j < PX; j += 2) {
+      for (let i = 0; i < PX; i += 2) {
+        const [r, g, bl] = asphalt(x0 + i, y0 + j)
+        for (let dj = 0; dj < 2 && y0 + j + dj < H; dj++) {
+          for (let di = 0; di < 2 && x0 + i + di < W; di++) {
+            const p = ((y0 + j + dj) * W + x0 + i + di) * 4
+            b[p] = r; b[p + 1] = g; b[p + 2] = bl; b[p + 3] = 255
+          }
+        }
+      }
+    }
+  }
   for (let ty = 0; ty < mapH; ty++) {
     for (let tx = 0; tx < mapW; tx++) {
       const gid = groundGids[ty * mapW + tx]
       const x0 = tx * PX
       const y0 = ty * PX
       if (gid === 3 || gid === 4) {
-        // ---- road / intersection -----------------------------------------
-        speckle(x0, y0, 22, 26)
-        if (Math.random() < 0.85) clump(x0, y0, 2 + (Math.random() * 2) | 0, 1 + (Math.random() * 2) | 0, Math.random() < 0.5 ? -20 : 15)
-        if (Math.random() < 0.35) clump(x0, y0, 3, 2, -14)
-        const dirV = tx % 8 === 0 && ty % 8 !== 0
-        const dirH = ty % 8 === 0 && tx % 8 !== 0
-        if (gid === 3) {
-          if (dirV) {
-            lineV(x0 + 1, y0, PX, EDGE)
-            lineV(x0 + PX - 2, y0, PX, EDGE)
-            for (let j = 0; j < PX; j++) {
-              const g = y0 + j
-              if (g % 28 < 14) set(x0 + (PX >> 1), g, CENTER[0], CENTER[1], CENTER[2])
-            }
-            for (let j = 0; j < PX; j++) {
-              dith(((y0 + j) * W + x0 + 2) * 4, -16)
-              dith(((y0 + j) * W + x0 + 3) * 4, -16)
-              dith(((y0 + j) * W + x0 + PX - 4) * 4, -16)
-              dith(((y0 + j) * W + x0 + PX - 3) * 4, -16)
-            }
-          } else if (dirH) {
-            lineH(y0 + 1, x0, PX, EDGE)
-            lineH(y0 + PX - 2, x0, PX, EDGE)
-            for (let j = 0; j < PX; j++) {
-              const g = x0 + j
-              if (g % 28 < 14) set(g, y0 + (PX >> 1), CENTER[0], CENTER[1], CENTER[2])
-            }
-            for (let j = 0; j < PX; j++) {
-              dith(((y0 + 2) * W + x0 + j) * 4, -16)
-              dith(((y0 + 3) * W + x0 + j) * 4, -16)
-              dith(((y0 + PX - 4) * W + x0 + j) * 4, -16)
-              dith(((y0 + PX - 3) * W + x0 + j) * 4, -16)
-            }
-          } else {
-            // intersection: keep edge lines, drop center dashes
-            lineV(x0 + 1, y0, PX, EDGE)
-            lineV(x0 + PX - 2, y0, PX, EDGE)
-            lineH(y0 + 1, x0, PX, EDGE)
-            lineH(y0 + PX - 2, x0, PX, EDGE)
-          }
-        } else {
-          // crosswalk stripes
-          for (let j = 0; j < PX; j++) {
-            if ((j % 5) < 3) lineH(y0 + j, x0 + 1, PX - 2, CROSS)
-          }
-          lineV(x0 + 1, y0, PX, EDGE)
-          lineV(x0 + PX - 2, y0, PX, EDGE)
-        }
+        // smooth asphalt detail; lane markings are clean geometry (buildMarkings)
+        fillRoad(x0, y0)
       } else if (gid === 2) {
         // ---- sidewalk ------------------------------------------------------
-        speckle(x0, y0, 10, 8)
+        speckle(x0, y0, 40, 8)
         lineV(x0 + (PX >> 1), y0, PX, [86, 87, 92])
         lineH(y0 + (PX >> 1), x0, PX, [86, 87, 92])
         set(x0 + (PX >> 1) + 1, y0 + (PX >> 1) + 1, 128, 129, 134)
@@ -734,22 +775,22 @@ function buildGround() {
         if (gidAt(tx, ty - 1) === 3 || gidAt(tx, ty - 1) === 4) lineH(y0, x0, PX, [38, 40, 46])
         if (gidAt(tx, ty + 1) === 3 || gidAt(tx, ty + 1) === 4) lineH(y0 + PX - 1, x0, PX, [38, 40, 46])
       } else if (gid === 1) {
-        speckle(x0, y0, 16, 14)
-        for (let k = 0; k < 4; k++) {
+        speckle(x0, y0, 64, 14)
+        for (let k = 0; k < 16; k++) {
           const sx = x0 + (Math.random() * PX) | 0
           const sy = y0 + (Math.random() * (PX - 2)) | 0
           dith((sy * W + sx) * 4, -22)
           dith(((sy + 1) * W + sx) * 4, -22)
         }
-        for (let k = 0; k < 2; k++) {
+        for (let k = 0; k < 8; k++) {
           const sx = x0 + (Math.random() * PX) | 0
           const sy = y0 + (Math.random() * (PX - 2)) | 0
           dith((sy * W + sx) * 4, 18)
           dith(((sy + 1) * W + sx) * 4, 18)
         }
       } else if (gid === 9) {
-        speckle(x0, y0, 12, 18)
-        for (let k = 0; k < 3; k++) {
+        speckle(x0, y0, 48, 18)
+        for (let k = 0; k < 12; k++) {
           const sx = x0 + (Math.random() * (PX - 3)) | 0
           const sy = y0 + (Math.random() * (PX - 2)) | 0
           for (let j = 0; j < 2; j++) {
@@ -758,36 +799,127 @@ function buildGround() {
           }
         }
       } else if (gid === 10) {
-        speckle(x0, y0, 10, 12)
+        speckle(x0, y0, 40, 12)
         lineV(x0 + 2, y0, PX, [159, 163, 169])
         lineV(x0 + PX - 3, y0, PX, [159, 163, 169])
-        clump(x0, y0, 2, 2, -18)
+        clump(x0, y0, 4, 4, -18)
       } else if (gid === 11) {
-        speckle(x0, y0, 16, 10)
+        speckle(x0, y0, 64, 10)
         if (Math.random() < 0.5) {
           const sx = x0 + (Math.random() * (PX - 3)) | 0
           const sy = y0 + (Math.random() * (PX - 3)) | 0
-          lineV(sx, sy, 2 + (Math.random() * 2) | 0, [140, 137, 128])
+          lineV(sx, sy, 4 + (Math.random() * 4) | 0, [140, 137, 128])
         }
       } else if (gid === 12) {
-        speckle(x0, y0, 26, 20)
-        clump(x0, y0, 3, 2, 18)
+        speckle(x0, y0, 104, 20)
+        clump(x0, y0, 6, 4, 18)
       }
+    }
+  }
+
+  // ---- contact shading: darken ground at building bases and under trees ----
+  const bIsB = (v) => v === 5 || v === 6 || v === 7 || v === 13
+  for (let ty = 0; ty < mapH; ty++) {
+    for (let tx = 0; tx < mapW; tx++) {
+      const i = ty * mapW + tx
+      const bld = bldGids[i]
+      const x0 = tx * PX
+      const y0 = ty * PX
+      if (bld === 8) {
+        for (let j = 1; j < PX - 1; j++)
+          for (let k = 1; k < PX - 1; k++)
+            dith(((y0 + j) * W + x0 + k) * 4, -12)
+        continue
+      }
+      if (bIsB(bld)) continue
+      const ao = 42
+      if (ty > 0 && bIsB(bldGids[(ty - 1) * mapW + tx])) for (let k = 0; k < PX; k++) dith(((y0) * W + x0 + k) * 4, -ao)
+      if (ty < mapH - 1 && bIsB(bldGids[(ty + 1) * mapW + tx])) for (let k = 0; k < PX; k++) dith(((y0 + PX - 1) * W + x0 + k) * 4, -ao)
+      if (tx > 0 && bIsB(bldGids[ty * mapW + tx - 1])) for (let j = 0; j < PX; j++) dith(((y0 + j) * W + x0) * 4, -ao)
+      if (tx < mapW - 1 && bIsB(bldGids[ty * mapW + tx + 1])) for (let j = 0; j < PX; j++) dith(((y0 + j) * W + x0 + PX - 1) * 4, -ao)
     }
   }
 
   ctx.putImageData(img, 0, 0)
   const tex = new THREE.CanvasTexture(c)
   tex.colorSpace = THREE.SRGBColorSpace
-  tex.anisotropy = Math.min(8, renderer.capabilities.getMaxAnisotropy())
+  tex.minFilter = THREE.LinearMipmapLinearFilter
+  tex.anisotropy = Math.min(16, renderer.capabilities.getMaxAnisotropy())
+  const normalTex = makeAsphaltNormal(512)
   const plane = new THREE.Mesh(
     new THREE.PlaneGeometry(mapW * TILE, mapH * TILE),
-    new THREE.MeshBasicMaterial({ map: tex })
+    new THREE.MeshLambertMaterial({ map: tex, normalMap: normalTex, normalScale: new THREE.Vector2(0.55, 0.55) })
   )
   plane.rotation.x = -Math.PI / 2
   plane.position.set((mapW * TILE) / 2, 0, (mapH * TILE) / 2)
   plane.receiveShadow = true
   scene.add(plane)
+}
+
+// subtle tileable normal map for asphalt surface roughness
+function makeAsphaltNormal(size) {
+  const c = document.createElement('canvas')
+  c.width = size
+  c.height = size
+  const ctx = c.getContext('2d')
+  const img = ctx.createImageData(size, size)
+  const d = img.data
+  const hash = (a, b, seed) => {
+    let h = (a * 374761393 + b * 668265263 + seed * 2246822519) | 0
+    h = (h ^ (h >>> 13)) | 0
+    h = Math.imul(h, 1274126177)
+    return ((h ^ (h >>> 16)) >>> 0) / 4294967296
+  }
+  const grids = [32, 8].map((cell) => {
+    const n = size / cell
+    const data = new Float32Array(n * n)
+    for (let j = 0; j < n; j++) {
+      for (let i = 0; i < n; i++) data[j * n + i] = hash(i, j, cell)
+    }
+    return { cell, n, data }
+  })
+  const hAt = (x, y) => {
+    let v = 0
+    for (const g of grids) {
+      const c0 = g.cell
+      const gx0 = ((Math.floor(x / c0) % g.n) + g.n) % g.n
+      const gy0 = ((Math.floor(y / c0) % g.n) + g.n) % g.n
+      const gx1 = (gx0 + 1) % g.n
+      const gy1 = (gy0 + 1) % g.n
+      const fx = (x - gx0 * c0) / c0
+      const fy = (y - gy0 * c0) / c0
+      const sx = fx * fx * (3 - 2 * fx)
+      const sy = fy * fy * (3 - 2 * fy)
+      const row = gy0 * g.n
+      const A = g.data[row + gx0]
+      const B = g.data[row + gx1]
+      const C = g.data[gy1 * g.n + gx0]
+      const D = g.data[gy1 * g.n + gx1]
+      v += (A + (B - A) * sx + (C - A) * sy + (A - B - C + D) * sx * sy - 0.5) * (c0 === 32 ? 6 : 2.5)
+    }
+    return v
+  }
+  const STR = 0.07
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      const dx = (hAt(x + 1, y) - hAt(x - 1, y)) * STR
+      const dy = (hAt(x, y + 1) - hAt(x, y - 1)) * STR
+      const l = Math.hypot(dx, dy, 1)
+      const i = (y * size + x) * 4
+      d[i] = (dx / l) * 127 + 128
+      d[i + 1] = (dy / l) * 127 + 128
+      d[i + 2] = (1 / l) * 127 + 128
+      d[i + 3] = 255
+    }
+  }
+  ctx.putImageData(img, 0, 0)
+  const tex = new THREE.CanvasTexture(c)
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping
+  tex.repeat.set(
+    Math.max(1, Math.round((mapW * GROUND_PX) / size)),
+    Math.max(1, Math.round((mapH * GROUND_PX) / size))
+  )
+  return tex
 }
 
 // raised sidewalk slabs + curbs along every road edge
@@ -886,109 +1018,397 @@ function buildCurbs() {
   }
 }
 
-function buildBuildings() {
-  const types = {
-    5: { base: 22, jit: 36, col: 0x6d7078 },
-    6: { base: 13, jit: 22, col: 0xa5533f },
-    7: { base: 30, jit: 42, col: 0xc8b290 },
-    13: { base: 44, jit: 46, col: 0x2e7d86 }
+const BUILD_STYLE = {
+  5: { base: 22, jit: 36, style: 'office', wall: [109, 112, 120], tiers: [13.2, 22, 30.8, 44, 57.2, 74.8] },
+  6: { base: 13, jit: 22, style: 'brick', wall: [165, 83, 63], tiers: [8.8, 13.2, 17.6, 22, 26.4, 35.2] },
+  7: { base: 30, jit: 42, style: 'shop', wall: [200, 178, 144], tiers: [13.2, 22, 30.8, 39.6, 52.8, 66] },
+  13: { base: 44, jit: 46, style: 'tower', wall: [46, 125, 134], tiers: [30.8, 44, 57.2, 70.4, 85.8] }
+}
+
+const facadeCache = new Map()
+function texFacade(gid, h) {
+  const key = gid + ':' + h
+  if (facadeCache.has(key)) return facadeCache.get(key)
+  const W = 128
+  const H = Math.max(48, Math.round(h * 8))
+  const c = document.createElement('canvas')
+  c.width = W
+  c.height = H
+  const g = c.getContext('2d')
+  const wall = BUILD_STYLE[gid].wall
+  const mix = (m) => `rgb(${Math.min(255, wall[0] * m) | 0},${Math.min(255, wall[1] * m) | 0},${Math.min(255, wall[2] * m) | 0})`
+  const grad = g.createLinearGradient(0, 0, 0, H)
+  grad.addColorStop(0, mix(1.06))
+  grad.addColorStop(0.8, mix(1))
+  grad.addColorStop(1, mix(0.86))
+  g.fillStyle = grad
+  g.fillRect(0, 0, W, H)
+  if (BUILD_STYLE[gid].style === 'brick') {
+    for (let y = 0; y < H; y += 8) {
+      g.strokeStyle = 'rgba(60,26,18,0.55)'
+      g.lineWidth = 1
+      g.beginPath()
+      g.moveTo(0, y + 0.5)
+      g.lineTo(W, y + 0.5)
+      g.stroke()
+      g.strokeStyle = 'rgba(120,64,44,0.5)'
+      g.beginPath()
+      g.moveTo(0, y + 3.5)
+      g.lineTo(W, y + 3.5)
+      g.stroke()
+      g.fillStyle = 'rgba(60,26,18,0.5)'
+      for (let x = ((y / 8) % 2 ? 4 : 0); x < W; x += 16) g.fillRect(x, y + 1, 1, 7)
+    }
   }
+  const floors = Math.max(1, Math.round(h / 4.4))
+  const floorPx = H / floors
+  const winH = floorPx * 0.62
+  const cols = BUILD_STYLE[gid].style === 'tower' ? 6 : 5
+  const cell = W / cols
+  const winW = cell * 0.6
+  const glassDark = BUILD_STYLE[gid].style === 'tower' ? [38, 70, 84] : [30, 42, 54]
+  for (let f = 0; f < floors; f++) {
+    const yTop = H - (f + 1) * floorPx
+    const bandB = H - f * floorPx
+    for (let xc = 0; xc < cols; xc++) {
+      const x = xc * cell + cell * 0.08
+      const v = ((gid * 31 + f * 97 + xc * 57) % 23) - 11
+      g.fillStyle = mix(0.62)
+      g.fillRect(x - 1.5, yTop - 1.5, winW + 3, winH + 3)
+      const gl = g.createLinearGradient(0, yTop, 0, yTop + winH)
+      const c1 = Math.min(255, Math.max(8, glassDark[0] + v * 2))
+      const c2 = Math.min(255, Math.max(8, glassDark[1] + v * 2))
+      const c3 = Math.min(255, Math.max(8, glassDark[2] + v * 2))
+      gl.addColorStop(0, `rgb(${c1},${c2},${c3})`)
+      gl.addColorStop(0.55, `rgb(${Math.min(255, c1 + 14)},${Math.min(255, c2 + 16)},${Math.min(255, c3 + 20)})`)
+      gl.addColorStop(1, `rgb(${Math.max(0, c1 - 8)},${Math.max(0, c2 - 8)},${Math.max(0, c3 - 8)})`)
+      g.fillStyle = gl
+      g.fillRect(x, yTop, winW, winH)
+      g.fillStyle = 'rgba(255,255,255,0.09)'
+      g.fillRect(x + winW * 0.32, yTop, 1.5, winH)
+    }
+    if (f === 0 && BUILD_STYLE[gid].style !== 'office' && BUILD_STYLE[gid].style !== 'tower') {
+      g.fillStyle = 'rgba(12,14,16,0.92)'
+      g.fillRect(0, bandB - floorPx * 0.9, W, floorPx * 0.9)
+      g.fillStyle = 'rgba(46,60,72,0.9)'
+      g.fillRect(4, bandB - floorPx * 0.82, cell * 1.9, floorPx * 0.72)
+      g.fillRect(W - cell * 1.9 - 4, bandB - floorPx * 0.82, cell * 1.9, floorPx * 0.72)
+      g.fillStyle = mix(0.5)
+      g.fillRect(cell * 1.9 + 4, bandB - floorPx * 0.82, cell * 0.32, floorPx * 0.72)
+      g.fillStyle = 'rgba(160,120,84,0.75)'
+      g.fillRect(0, bandB - floorPx * 1.0, W, floorPx * 0.1)
+      g.fillStyle = 'rgba(0,0,0,0.25)'
+      for (let sx = 0; sx < W; sx += 14) g.fillRect(sx, bandB - floorPx * 0.98, 5, floorPx * 0.07)
+    }
+    g.fillStyle = 'rgba(0,0,0,0.3)'
+    g.fillRect(0, bandB - 2.5, W, 2.5)
+  }
+  if (BUILD_STYLE[gid].style !== 'tower') {
+    g.fillStyle = mix(0.78)
+    g.fillRect(0, 0, W, 7)
+    g.fillStyle = 'rgba(0,0,0,0.25)'
+    g.fillRect(0, 6, W, 1.5)
+  } else {
+    g.fillStyle = 'rgba(20,30,36,0.55)'
+    g.fillRect(0, 0, W, 4)
+  }
+  g.fillStyle = 'rgba(0,0,0,0.45)'
+  g.fillRect(0, H - 2, W, 2)
+  g.fillStyle = 'rgba(0,0,0,0.22)'
+  g.fillRect(0, H - 5, W, 3)
+  const tex = new THREE.CanvasTexture(c)
+  tex.colorSpace = THREE.SRGBColorSpace
+  tex.anisotropy = Math.min(4, renderer.capabilities.getMaxAnisotropy())
+  facadeCache.set(key, tex)
+  return tex
+}
+
+// crisp lane markings as clean geometry (edge lines, center dashes, crosswalks),
+// drawn just above the ground so they stay sharp at any camera distance
+function buildMarkings() {
+  const gidAt = (gx, gy) =>
+    gx < 0 || gy < 0 || gx >= mapW || gy >= mapH ? 0 : groundGids[gy * mapW + gx]
+  const isRoad = (g) => g === 3 || g === 4
+  const mat = new THREE.MeshLambertMaterial({
+    color: 0xf2f3f7,
+    polygonOffset: true,
+    polygonOffsetFactor: -4,
+    polygonOffsetUnits: -4
+  })
+
+  const edges = []
+  const items = []
+  const q = new THREE.Quaternion()
+
+  // ---- edge lines: one full-length run along each side of every road strip --
+  for (let cx = 0; cx < mapW; cx += 8) {
+    for (const side of [-1, 1]) {
+      let run = null
+      const ex = cx * TILE + (side < 0 ? 2 : TILE - 2)
+      for (let y = 0; y <= mapH; y++) {
+        const ok = y < mapH && isRoad(gidAt(cx, y))
+        if (ok && run === null) run = y
+        else if (!ok && run !== null) {
+          const z0 = run * TILE
+          const z1 = y * TILE
+          if (z1 - z0 > 2) edges.push({ x: ex, z: (z0 + z1) / 2, sx: 1.0, sz: z1 - z0 })
+          run = null
+        }
+      }
+    }
+  }
+  for (let cy = 0; cy < mapH; cy += 8) {
+    for (const side of [-1, 1]) {
+      let run = null
+      const ey = cy * TILE + (side < 0 ? 2 : TILE - 2)
+      for (let x = 0; x <= mapW; x++) {
+        const ok = x < mapW && isRoad(gidAt(x, cy))
+        if (ok && run === null) run = x
+        else if (!ok && run !== null) {
+          const x0 = run * TILE
+          const x1 = x * TILE
+          if (x1 - x0 > 2) edges.push({ x: (x0 + x1) / 2, z: ey, sx: x1 - x0, sz: 1.0 })
+          run = null
+        }
+      }
+    }
+  }
+
+  // 2. dashed center line (world-aligned 14/28 pattern, skips intersections)
+  // 3. crosswalk zebra stripes (3-on / 5-off pattern per tile)
+  for (let ty = 0; ty < mapH; ty++) {
+    for (let tx = 0; tx < mapW; tx++) {
+      const gid = gidAt(tx, ty)
+      if (!isRoad(gid)) continue
+      const x0 = tx * TILE
+      const y0 = ty * TILE
+      if (gid === 4) {
+        for (let j = 0; j < TILE; j++) {
+          if (j % 5 < 3) items.push({ x: x0 + TILE / 2, z: y0 + j + 0.5, sx: TILE - 3, sz: 1.0 })
+        }
+        continue
+      }
+      if (tx % 8 === 0 && ty % 8 !== 0) {
+        for (let y = y0; y < y0 + TILE; ) {
+          const p = y % 28
+          if (p >= 14) { y += 28 - p; continue }
+          const len = Math.min(14 - p, y0 + TILE - y)
+          items.push({ x: x0 + TILE / 2, z: y + len / 2, sx: 1.0, sz: len })
+          y += len
+        }
+      } else if (tx % 8 !== 0 && ty % 8 === 0) {
+        for (let x = x0; x < x0 + TILE; ) {
+          const p = x % 28
+          if (p >= 14) { x += 28 - p; continue }
+          const len = Math.min(14 - p, x0 + TILE - x)
+          items.push({ x: x + len / 2, z: y0 + TILE / 2, sx: len, sz: 1.0 })
+          x += len
+        }
+      }
+    }
+  }
+
+  if (edges.length) {
+    const mesh = new THREE.InstancedMesh(new THREE.BoxGeometry(1, 1, 1), mat, edges.length)
+    const m = new THREE.Matrix4()
+    for (let i = 0; i < edges.length; i++) {
+      m.compose(
+        new THREE.Vector3(edges[i].x, 0.03, edges[i].z),
+        q,
+        new THREE.Vector3(edges[i].sx, 0.02, edges[i].sz)
+      )
+      mesh.setMatrixAt(i, m)
+    }
+    mesh.instanceMatrix.needsUpdate = true
+    scene.add(mesh)
+  }
+  if (items.length) {
+    const mesh = new THREE.InstancedMesh(new THREE.BoxGeometry(1, 1, 1), mat, items.length)
+    const m = new THREE.Matrix4()
+    for (let i = 0; i < items.length; i++) {
+      m.compose(
+        new THREE.Vector3(items[i].x, 0.03, items[i].z),
+        q,
+        new THREE.Vector3(items[i].sx, 0.02, items[i].sz)
+      )
+      mesh.setMatrixAt(i, m)
+    }
+    mesh.instanceMatrix.needsUpdate = true
+    scene.add(mesh)
+  }
+}
+
+function buildBuildings() {
   const cenX = (mapW * TILE) / 2
   const cenY = (mapH * TILE) / 2
-  const mats = {}
-  const buckets = {}
-  for (const k of Object.keys(types)) {
-    mats[k] = new THREE.MeshLambertMaterial({ color: types[k].col })
-    buckets[k] = []
-  }
+  const buckets = new Map()
   for (let y = 0; y < mapH; y++) {
     for (let x = 0; x < mapW; x++) {
       const b = bldGids[y * mapW + x]
-      if (!b || !types[b]) continue
+      const st = BUILD_STYLE[b]
+      if (!st) continue
       const px = x * TILE + 8
       const py = y * TILE + 8
       const d = Math.hypot(px - cenX, py - cenY)
       const boost = d < 700 ? 24 * (1 - d / 700) : 0
-      const h = Math.min(92, Math.max(6, types[b].base + hue(x, y, 0.2) * types[b].jit + boost))
-      buckets[b].push({ x: px, z: py, h })
+      const h = Math.min(92, Math.max(6, st.base + hue(x, y, 0.2) * st.jit + boost))
+      let ht = st.tiers[0]
+      let best = Infinity
+      for (const t of st.tiers) {
+        const df = Math.abs(t - h)
+        if (df < best) { best = df; ht = t }
+      }
+      const key = b + ':' + ht
+      let arr = buckets.get(key)
+      if (!arr) buckets.set(key, (arr = []))
+      arr.push({ x: px, z: py })
     }
   }
   const mat = new THREE.Matrix4()
   const tcol = new THREE.Color()
-  for (const k of Object.keys(buckets)) {
-    const list = buckets[k]
-    if (!list.length) continue
-    const inst = new THREE.InstancedMesh(new THREE.BoxGeometry(TILE, 1, TILE), mats[k], list.length)
-    inst.castShadow = true
-    inst.receiveShadow = true
+  const pos = new THREE.Vector3()
+  const zero = new THREE.Quaternion()
+  const sc = new THREE.Vector3()
+  for (const [key, list] of buckets) {
+    const [b, ht] = key.split(':').map(Number)
+    const st = BUILD_STYLE[b]
+    const wall = new THREE.InstancedMesh(
+      new THREE.BoxGeometry(TILE, ht, TILE),
+      new THREE.MeshStandardMaterial({ map: texFacade(b, ht), roughness: 0.9, metalness: 0.06 }),
+      list.length
+    )
+    wall.castShadow = true
+    wall.receiveShadow = true
+    const crown = new THREE.InstancedMesh(
+      new THREE.BoxGeometry(TILE, st.style === 'tower' ? 1.2 : 1.8, TILE),
+      new THREE.MeshLambertMaterial(),
+      list.length
+    )
+    crown.castShadow = true
+    crown.receiveShadow = true
+    const cap = st.style === 'shop'
+      ? new THREE.InstancedMesh(new THREE.ConeGeometry(11.3, 3.4, 4), new THREE.MeshLambertMaterial(), list.length)
+      : new THREE.InstancedMesh(new THREE.BoxGeometry(TILE + 2.2, 0.8, TILE + 2.2), new THREE.MeshLambertMaterial(), list.length)
+    cap.castShadow = true
+    if (st.style === 'shop') cap.rotation.y = Math.PI / 4
     list.forEach((it, i) => {
-      mat.makeTranslation(it.x, it.h / 2, it.z)
-      inst.setMatrixAt(i, mat)
-      inst.setColorAt(i, tcol.setHex(types[k].col).multiplyScalar(0.95 + hue(it.x, it.z, 0.5) * 0.1))
+      const v = hue(it.x, it.z, 0.5)
+      mat.makeTranslation(it.x, ht / 2, it.z)
+      wall.setMatrixAt(i, mat)
+      wall.setColorAt(i, tcol.setRGB(st.wall[0] / 255, st.wall[1] / 255, st.wall[2] / 255).multiplyScalar(0.94 + v * 0.12))
+      mat.makeTranslation(it.x, ht + (st.style === 'tower' ? 0.6 : 0.9), it.z)
+      crown.setMatrixAt(i, mat)
+      crown.setColorAt(i, tcol.setRGB(st.wall[0] / 255, st.wall[1] / 255, st.wall[2] / 255).multiplyScalar(0.72 + v * 0.1))
+      const cy = st.style === 'shop' ? ht + 1.7 : ht + (st.style === 'tower' ? 1.2 : 2.2)
+      mat.makeTranslation(it.x, cy, it.z)
+      cap.setMatrixAt(i, mat)
+      cap.setColorAt(i, tcol.setRGB(st.wall[0] / 255, st.wall[1] / 255, st.wall[2] / 255).multiplyScalar(0.5 + v * 0.12))
     })
-    inst.instanceMatrix.needsUpdate = true
-    inst.instanceColor.needsUpdate = true
-    scene.add(inst)
+    wall.instanceMatrix.needsUpdate = true
+    wall.instanceColor.needsUpdate = true
+    crown.instanceMatrix.needsUpdate = true
+    crown.instanceColor.needsUpdate = true
+    cap.instanceMatrix.needsUpdate = true
+    cap.instanceColor.needsUpdate = true
+    scene.add(wall, crown, cap)
   }
 }
 
-let barkTex = null
+let barkRes = null
 function texBark() {
-  if (barkTex) return barkTex
+  if (barkRes) return barkRes
   const c = document.createElement('canvas')
-  c.width = 64
-  c.height = 128
+  c.width = 128
+  c.height = 256
   const g = c.getContext('2d')
-  const base = g.createLinearGradient(0, 0, 0, 128)
-  base.addColorStop(0, '#6b4826')
-  base.addColorStop(1, '#4c3115')
+  const base = g.createLinearGradient(0, 0, 0, 256)
+  base.addColorStop(0, '#7a5230')
+  base.addColorStop(0.55, '#5d3c1e')
+  base.addColorStop(1, '#43290f')
   g.fillStyle = base
-  g.fillRect(0, 0, 64, 128)
-  for (let i = 0; i < 70; i++) {
-    const x = Math.random() * 64
-    const y0 = Math.random() * 128
-    const len = 14 + Math.random() * 90
-    g.strokeStyle = Math.random() < 0.55
-      ? `rgba(128,82,52,${(0.18 + Math.random() * 0.3).toFixed(2)})`
-      : `rgba(28,17,6,${(0.22 + Math.random() * 0.3).toFixed(2)})`
-    g.lineWidth = 0.8 + Math.random() * 2.4
+  g.fillRect(0, 0, 128, 256)
+  const ridge = () => Math.random() * 3 - 1.5
+  for (let i = 0; i < 46; i++) {
+    const x = Math.random() * 128
+    const y0 = Math.random() * 256
+    const len = 40 + Math.random() * 160
+    g.strokeStyle = Math.random() < 0.5
+      ? `rgba(148,105,64,${(0.3 + Math.random() * 0.4).toFixed(2)})`
+      : `rgba(24,13,5,${(0.35 + Math.random() * 0.35).toFixed(2)})`
+    g.lineWidth = 1 + Math.random() * 3
     g.beginPath()
     g.moveTo(x, y0)
-    g.quadraticCurveTo(x + (Math.random() * 7 - 3.5), y0 + len * 0.5, x + (Math.random() * 9 - 4.5), y0 + len)
+    g.bezierCurveTo(x + ridge() * 10, y0 + len * 0.35, x + ridge() * 14, y0 + len * 0.7, x + ridge() * 16, y0 + len)
     g.stroke()
   }
-  for (let i = 0; i < 5; i++) {
-    g.fillStyle = `rgba(28,19,8,${(0.3 + Math.random() * 0.25).toFixed(2)})`
+  for (let i = 0; i < 26; i++) {
+    const y = Math.random() * 256
+    const x0 = Math.random() * 60
+    g.strokeStyle = `rgba(20,11,4,${(0.25 + Math.random() * 0.25).toFixed(2)})`
+    g.lineWidth = 0.6 + Math.random() * 1.2
     g.beginPath()
-    g.ellipse(Math.random() * 64, Math.random() * 128, 1.3 + Math.random(), 2 + Math.random() * 1.6, Math.random() * 1.5, 0, Math.PI * 2)
-    g.fill()
+    g.moveTo(x0, y)
+    g.lineTo(x0 + 14 + Math.random() * 40, y + (Math.random() * 5 - 2.5))
+    g.stroke()
   }
-  barkTex = new THREE.CanvasTexture(c)
-  barkTex.wrapS = barkTex.wrapT = THREE.RepeatWrapping
-  barkTex.colorSpace = THREE.SRGBColorSpace
-  return barkTex
+  for (let i = 0; i < 7; i++) {
+    const kx = Math.random() * 128
+    const ky = Math.random() * 256
+    g.fillStyle = `rgba(26,15,6,${(0.45 + Math.random() * 0.3).toFixed(2)})`
+    g.beginPath()
+    g.ellipse(kx, ky, 2 + Math.random() * 2.4, 3 + Math.random() * 3.4, Math.random() * 1.6, 0, Math.PI * 2)
+    g.fill()
+    g.strokeStyle = 'rgba(150,110,70,0.45)'
+    g.lineWidth = 0.8
+    g.beginPath()
+    g.arc(kx, ky, 3 + Math.random() * 3, 0, Math.PI * 2)
+    g.stroke()
+  }
+  const map = new THREE.CanvasTexture(c)
+  map.wrapS = map.wrapT = THREE.RepeatWrapping
+  map.colorSpace = THREE.SRGBColorSpace
+  const bc = document.createElement('canvas')
+  bc.width = 128
+  bc.height = 256
+  const bg = bc.getContext('2d')
+  bg.drawImage(c, 0, 0)
+  const id = bg.getImageData(0, 0, 128, 256)
+  const d = id.data
+  for (let i = 0; i < d.length; i += 4) {
+    const l = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2]
+    d[i] = d[i + 1] = d[i + 2] = l
+    d[i + 3] = 255
+  }
+  bg.putImageData(id, 0, 0)
+  const bump = new THREE.CanvasTexture(bc)
+  bump.wrapS = bump.wrapT = THREE.RepeatWrapping
+  barkRes = { map, bump }
+  return barkRes
 }
 
 let leafTex = null
 function texLeaves() {
   if (leafTex) return leafTex
   const c = document.createElement('canvas')
-  c.width = 64
-  c.height = 64
+  c.width = 128
+  c.height = 128
   const g = c.getContext('2d')
-  g.fillStyle = '#14381a'
-  g.fillRect(0, 0, 64, 64)
-  for (let i = 0; i < 340; i++) {
-    const shade = Math.random()
-    g.fillStyle = shade < 0.45
-      ? `rgba(28,72,34,${(0.35 + Math.random() * 0.4).toFixed(2)})`
-      : shade < 0.8
-        ? `rgba(56,122,38,${(0.3 + Math.random() * 0.4).toFixed(2)})`
-        : `rgba(88,142,52,${(0.25 + Math.random() * 0.35).toFixed(2)})`
-    const r = 1.2 + Math.random() * 3.2
-    g.beginPath()
-    g.arc(Math.random() * 64, Math.random() * 64, r, 0, Math.PI * 2)
-    g.fill()
+  const tuft = (x, y, r, col) => {
+    g.fillStyle = col
+    g.beginPath(); g.arc(x, y, r, 0, Math.PI * 2); g.fill()
+    g.beginPath(); g.arc(x + r * 0.55, y + r * 0.2, r * 0.6, 0, Math.PI * 2); g.fill()
+    g.beginPath(); g.arc(x - r * 0.5, y + r * 0.35, r * 0.5, 0, Math.PI * 2); g.fill()
+    g.beginPath(); g.arc(x + r * 0.15, y - r * 0.55, r * 0.55, 0, Math.PI * 2); g.fill()
+  }
+  const greens = ['#173d1d', '#1f5426', '#2a6b2f', '#3d7f33', '#4f9139', '#275d24']
+  for (let i = 0; i < 90; i++) tuft(8 + Math.random() * 112, 8 + Math.random() * 112, 5 + Math.random() * 9, greens[i % 6])
+  for (let i = 0; i < 130; i++) tuft(4 + Math.random() * 120, 4 + Math.random() * 120, 3 + Math.random() * 6, greens[(i + 2) % 6])
+  for (let i = 0; i < 60; i++) tuft(Math.random() * 128, Math.random() * 128, 1.6 + Math.random() * 2.4, 'rgba(122,168,64,0.9)')
+  for (let i = 0; i < 24; i++) {
+    const x = Math.random() * 128
+    const y = Math.random() * 128
+    const r = 2 + Math.random() * 5
+    g.clearRect(x - r, y - r, r * 2, r * 2)
   }
   leafTex = new THREE.CanvasTexture(c)
   leafTex.colorSpace = THREE.SRGBColorSpace
@@ -1003,52 +1423,66 @@ function buildTrees() {
     }
   }
   if (!list.length) return
-  const trunk = new THREE.InstancedMesh(new THREE.CylinderGeometry(1.25, 1.9, 8, 7), new THREE.MeshLambertMaterial({ map: texBark() }), list.length)
-  const canopy = new THREE.InstancedMesh(new THREE.IcosahedronGeometry(4.6, 1), new THREE.MeshLambertMaterial({ map: texLeaves() }), list.length)
-  const lobe = new THREE.InstancedMesh(new THREE.IcosahedronGeometry(2.9, 1), new THREE.MeshLambertMaterial({ map: texLeaves() }), list.length)
-  trunk.castShadow = true
-  canopy.castShadow = true
-  lobe.castShadow = true
+  const bark = texBark()
+  const leaf = texLeaves()
+  const trunk = new THREE.InstancedMesh(new THREE.CylinderGeometry(1.0, 2.0, 9, 8, 1), new THREE.MeshLambertMaterial({ map: bark.map, bumpMap: bark.bump, bumpScale: 0.9 }), list.length)
+  const core = new THREE.InstancedMesh(new THREE.IcosahedronGeometry(4.8, 1), new THREE.MeshLambertMaterial({ map: leaf, alphaTest: 0.45, transparent: true }), list.length)
+  const lobeA = new THREE.InstancedMesh(new THREE.IcosahedronGeometry(3.2, 1), new THREE.MeshLambertMaterial({ map: leaf, alphaTest: 0.45, transparent: true }), list.length)
+  const lobeB = new THREE.InstancedMesh(new THREE.IcosahedronGeometry(2.5, 1), new THREE.MeshLambertMaterial({ map: leaf, alphaTest: 0.45, transparent: true }), list.length)
+  for (const m of [trunk, core, lobeA, lobeB]) {
+    m.castShadow = true
+    m.receiveShadow = true
+  }
   const mat = new THREE.Matrix4()
   const col = new THREE.Color()
-  const zero = new THREE.Quaternion()
   const pos = new THREE.Vector3()
   const sc = new THREE.Vector3()
+  const quat = new THREE.Quaternion()
+  const eul = new THREE.Euler()
   list.forEach((it, i) => {
     const v = hue(it.x, it.z, 0.1)
-    const h = 0.72 + v * 0.5
-    const r = 0.85 + hue(it.x, it.z, 0.37) * 0.35
-    const cs = 0.8 + hue(it.x, it.z, 0.71) * 0.45
-    const sq = 0.86 + hue(it.x, it.z, 0.53) * 0.26
-    const cy = h * 8 + 3.1 * cs * sq
-    pos.set(it.x, h * 4, it.z)
+    const h = 0.7 + v * 0.55
+    const r = 0.85 + hue(it.x, it.z, 0.37) * 0.4
+    const cs = 0.75 + hue(it.x, it.z, 0.71) * 0.55
+    const sq = 0.84 + hue(it.x, it.z, 0.53) * 0.3
+    const yaw = hue(it.x, it.z, 0.61) * Math.PI * 2
+    const lean = (hue(it.x, it.z, 0.83) - 0.5) * 0.12
+    const cy = h * 9 * 0.46 + 2.8 * cs * sq
+    eul.set(lean, yaw, 0)
+    quat.setFromEuler(eul)
+    pos.set(it.x, h * 4.5, it.z)
     sc.set(r, h, r)
-    mat.compose(pos, zero, sc)
+    mat.compose(pos, quat, sc)
     trunk.setMatrixAt(i, mat)
-    trunk.setColorAt(i, col.setHSL(0.075, 0.32, 0.22 + v * 0.09))
+    trunk.setColorAt(i, col.setHSL(0.075, 0.34, 0.2 + v * 0.1))
+    eul.set(0, yaw * 1.3, lean * 1.6)
+    quat.setFromEuler(eul)
     pos.set(it.x, cy, it.z)
     sc.set(cs, cs * sq, cs)
-    mat.compose(pos, zero, sc)
-    canopy.setMatrixAt(i, mat)
-    canopy.setColorAt(i, col.setHSL(0.29 + (hue(it.x, it.z, 0.9) - 0.5) * 0.07, 0.5 + hue(it.x, it.z, 0.9) * 0.22, 0.24 + hue(it.x, it.z, 0.3) * 0.16))
-    if (hue(it.x, it.z, 0.19) > 0.45) {
-      pos.set(it.x + (hue(it.x, it.z, 0.23) - 0.5) * 3.9, cy + 1.2 + hue(it.x, it.z, 0.31) * 2.2, it.z + (hue(it.x, it.z, 0.41) - 0.5) * 3.9)
-      sc.set(cs * 0.62, cs * 0.5, cs * 0.62)
-      mat.compose(pos, zero, sc)
-      lobe.setMatrixAt(i, mat)
-      lobe.setColorAt(i, col.setHSL(0.3 + (hue(it.x, it.z, 0.99) - 0.5) * 0.08, 0.52, 0.4 + hue(it.x, it.z, 0.13) * 0.16))
-    } else {
-      mat.makeScale(0.0001, 0.0001, 0.0001)
-      lobe.setMatrixAt(i, mat)
-    }
+    mat.compose(pos, quat, sc)
+    core.setMatrixAt(i, mat)
+    core.setColorAt(i, col.setHSL(0.27 + (hue(it.x, it.z, 0.9) - 0.5) * 0.09, 0.52 + hue(it.x, it.z, 0.9) * 0.2, 0.26 + hue(it.x, it.z, 0.3) * 0.15))
+    eul.set(0, yaw + 1.9, 0)
+    quat.setFromEuler(eul)
+    pos.set(it.x + Math.sin(yaw) * 2.6, cy + 1.6 + hue(it.x, it.z, 0.31) * 2.4, it.z + Math.cos(yaw) * 2.6)
+    sc.set(cs * 0.62, cs * 0.55 * sq, cs * 0.62)
+    mat.compose(pos, quat, sc)
+    lobeA.setMatrixAt(i, mat)
+    lobeA.setColorAt(i, col.setHSL(0.28 + (hue(it.x, it.z, 0.99) - 0.5) * 0.1, 0.5, 0.34 + hue(it.x, it.z, 0.13) * 0.14))
+    const side = yaw + Math.PI * 0.8
+    eul.set(0, yaw + 3.1, 0)
+    quat.setFromEuler(eul)
+    pos.set(it.x + Math.sin(side) * 3.4, cy - 0.4 + hue(it.x, it.z, 0.47) * 1.4, it.z + Math.cos(side) * 3.4)
+    sc.set(cs * 0.5, cs * 0.45 * sq, cs * 0.5)
+    mat.compose(pos, quat, sc)
+    lobeB.setMatrixAt(i, mat)
+    lobeB.setColorAt(i, col.setHSL(0.29 + (hue(it.x, it.z, 0.17) - 0.5) * 0.08, 0.54, 0.3 + hue(it.x, it.z, 0.59) * 0.12))
   })
-  trunk.instanceMatrix.needsUpdate = true
-  trunk.instanceColor.needsUpdate = true
-  canopy.instanceMatrix.needsUpdate = true
-  canopy.instanceColor.needsUpdate = true
-  lobe.instanceMatrix.needsUpdate = true
-  lobe.instanceColor.needsUpdate = true
-  scene.add(trunk, canopy, lobe)
+  for (const m of [trunk, core, lobeA, lobeB]) {
+    m.instanceMatrix.needsUpdate = true
+    if (m.instanceColor) m.instanceColor.needsUpdate = true
+    scene.add(m)
+  }
 }
 
 function buildStaticCars() {
@@ -1201,6 +1635,11 @@ function enterCar(c) {
   car.y = c.y
   car.r = THREE.MathUtils.degToRad(c.r)
   car.speed = 0
+  car._steer = 0
+  car._yaw = 0
+  car._sgn = 1
+  car._vdx = Math.sin(car.r)
+  car._vdy = -Math.cos(car.r)
   player.mesh.visible = false
   el('hud-prompt').style.display = 'none'
   updateHud()
@@ -1317,49 +1756,69 @@ function updateDrive(dt) {
   const onRoad = gid === 3 || gid === 4 || gid === 10
   const maxSpeed = MAX_SPEED * (onRoad ? 1 : D.OFFROAD_FACTOR)
 
-  // ---- longitudinal: throttle eases off near top speed, brakes bite, coast keeps momentum ----
+  // ---- longitudinal: power tapers to top speed (~1.5s 0→cruise), braking eases off smoothly ----
   let v = car.speed
+  const sp0 = Math.abs(v)
+  const brakeScale = 0.25 + 0.75 * Math.min(1, sp0 / maxSpeed)
   if (throttle && !back) {
-    if (v < -0.5) v = Math.min(0, v + D.BRAKE * dt)
+    if (v < -0.5) v = Math.min(0, v + D.BRAKE * brakeScale * dt)
     else v += D.ACCEL * Math.pow(Math.max(0, 1 - v / maxSpeed), D.ACCEL_CURVE) * dt
   } else if (back && !throttle) {
-    if (v > 0.5) v = Math.max(0, v - D.BRAKE * dt)
+    if (v > 0.5) v = Math.max(0, v - D.BRAKE * brakeScale * dt)
     else v -= D.REVERSE_ACCEL * Math.pow(Math.max(0, 1 + v / D.REVERSE_MAX), D.ACCEL_CURVE) * dt
   } else if (throttle && back) {
-    v = Math.max(0, v - D.BRAKE * dt)
+    v = Math.max(0, v - D.BRAKE * brakeScale * dt)
   } else {
     v *= Math.exp(-(onRoad ? D.COAST_ROAD : D.COAST_OFFROAD) * dt)
-    if (Math.abs(v) < 1.5) v = 0
+    if (Math.abs(v) < 1.2) v = 0
   }
   v = Math.max(-D.REVERSE_MAX, Math.min(maxSpeed, v))
   car.speed = v
 
-  // ---- steering: smoothed input + speed-shaped authority, no snapping ----
+  // ---- steering: sharper at low speed, wide arcs at high speed, angular velocity eased ----
   const d = Math.min(1, D.STEER_RESPONSE * dt)
   car._steer += (steerIn - car._steer) * d
   const sp = Math.abs(v)
   const frac = Math.min(1, sp / maxSpeed)
-  if (sp > D.MIN_STEER_SPEED) {
-    const turn = frac * (1 - 0.32 * frac) * D.STEER
-    car.r += car._steer * turn * dt * (v > 0 ? 1 : -1)
-  }
+  const authority = Math.max(0.45, 1 - 0.5 * frac)
+  const targetYaw = sp > D.MIN_STEER_SPEED ? car._steer * D.STEER * authority * (v > 0 ? 1 : -1) : 0
+  car._yaw += (targetYaw - car._yaw) * Math.min(1, D.YAW_RESPONSE * dt)
+  car.r += car._yaw * dt
 
+  // ---- momentum: actual motion direction lags the heading at speed (subtle drift) ----
   const { fx, fy } = shifted(car.r)
+  const sgn = v >= 0 ? 1 : -1
+  const sdx = fx * sgn
+  const sdy = fy * sgn
+  if (car._sgn !== sgn) {
+    car._sgn = sgn
+    car._vdx = sdx
+    car._vdy = sdy
+    car._yaw = 0
+  }
+  const grip = D.GRIP_LOW + (D.GRIP_HIGH - D.GRIP_LOW) * frac
+  car._vdx += (sdx - car._vdx) * Math.min(1, grip * dt)
+  car._vdy += (sdy - car._vdy) * Math.min(1, grip * dt)
+  const vlen = Math.hypot(car._vdx, car._vdy) || 1
+  const mvx = (car._vdx / vlen) * sp
+  const mvy = (car._vdy / vlen) * sp
 
   const oldX = car.x
   const oldY = car.y
-  moveCircle(car, 9, fx * sp * dt, fy * sp * dt)
+  moveCircle(car, 9, mvx * dt, mvy * dt)
   const moved = dist2(oldX, oldY, car.x, car.y)
   if (sp > 110 && moved < sp * dt * 0.3 && crashCooldown <= 0) {
     crashCooldown = 0.5
     playCrash(Math.min(1, sp / 220))
     damage(8)
+    car.speed *= 0.82 // absorb impact — no springy bounce-back
   }
   if (crashCooldown > 0) crashCooldown -= dt
   if (car.cur) {
     car.cur.mesh.position.set(car.x, 0, car.y)
     car.cur.mesh.rotation.y = car.r
-    car.cur.mesh.rotation.z = -car._steer * Math.min(1, sp / 150) * 0.05 // body roll while cornering
+    const roll = Math.max(-1, Math.min(1, car._yaw / (D.STEER * 0.75)))
+    car.cur.mesh.rotation.z = -roll * 0.05 * Math.min(1, sp / 150) // body roll while cornering
   }
 
   for (const p of peds) {
@@ -1546,6 +2005,7 @@ function drawMinimap() {
 // ---------------------------------------------------------------------------
 function loop() {
   requestAnimationFrame(loop)
+  state.frameNo++
   const dt = Math.min(clock.getDelta(), 0.05)
 
   if (state.busted) {
@@ -1587,10 +2047,20 @@ function loop() {
   updateMarker()
 
   const ref = car.inCar ? car : player
-  const { fx, fy } = shifted(car.inCar ? car.r : (player.moving ? player.r : 0))
   const d = state.cameraDist
-  camTarget.set(ref.x - fx * d, 0, ref.y - fy * d)
-  camTarget.y = d * 0.62
+  if (car.inCar) {
+    const { fx, fy } = shifted(car.r)
+    camYaw = -car.r
+    camTarget.set(ref.x - fx * d, 0, ref.y - fy * d)
+    camTarget.y = d * 0.62
+  } else {
+    camTarget.set(
+      ref.x + Math.sin(camYaw) * Math.cos(camPitch) * d,
+      0,
+      ref.y + Math.cos(camYaw) * Math.cos(camPitch) * d
+    )
+    camTarget.y = d * Math.sin(camPitch)
+  }
   camera.position.lerp(camTarget, 0.07)
   camera.lookAt(ref.x, 0, ref.y)
   dirLight.position.set(ref.x + 360, 740, ref.y - 240)
@@ -1640,11 +2110,30 @@ window.addEventListener('keydown', (e) => {
 })
 window.addEventListener('keyup', (e) => keys.delete(e.key.toLowerCase()))
 
+window.addEventListener('mousedown', (e) => {
+  if (e.button !== 0) return
+  mouseDown = true
+  lastMX = e.clientX
+  lastMY = e.clientY
+})
+window.addEventListener('mousemove', (e) => {
+  if (!mouseDown || car.inCar) return
+  const dx = e.clientX - lastMX
+  const dy = e.clientY - lastMY
+  lastMX = e.clientX
+  lastMY = e.clientY
+  camYaw -= dx * 0.006
+  camPitch = Math.max(0.12, Math.min(1.45, camPitch + dy * 0.005))
+})
+window.addEventListener('mouseup', () => { mouseDown = false })
+window.addEventListener('mouseleave', () => { mouseDown = false })
+
 // ---------------------------------------------------------------------------
 // boot
 // ---------------------------------------------------------------------------
 async function boot() {
   scene = new THREE.Scene()
+  window.__scene = scene
   scene.background = new THREE.Color(0x87b7d8)
   scene.fog = new THREE.Fog(0x87b7d8, 420, 3300)
   camera = new THREE.PerspectiveCamera(55, window.innerWidth / window.innerHeight, 0.1, 6000)
@@ -1698,6 +2187,7 @@ async function boot() {
 
   buildGround()
   buildCurbs()
+  buildMarkings()
   buildBuildings()
   buildTrees()
   buildStaticCars()
@@ -1747,36 +2237,58 @@ async function boot() {
     probe: (gx, gy) => ({ g: groundGids[gy * mapW + gx], b: bldGids[gy * mapW + gx], solid: solidTiles[gy * mapW + gx] }),
     debug: () => {
       if (!player.mesh) return null
-      const tmp = new THREE.Vector3()
-      const bb = new THREE.Box3().setFromObject(player.mesh)
-      let tris = 0
-      let culled = 0
-      let total = 0
-      const stack = [player.mesh]
-      while (stack.length) {
-        const o = stack.pop()
-        if (o.isMesh) {
-          const g = o.geometry
-          const n = g ? (g.index ? g.index.count / 3 : g.attributes.position.count / 3) : 0
-          tris += n
-          total++
-          const f = new THREE.Frustum()
-          o.getWorldPosition(tmp)
-          if (o.frustumCulled !== false && f.intersectsObject(o) === false) culled++
+      const out = { player: [], ped: [] }
+      const scan = (root) => {
+        const stack = [root]
+        const list = []
+        while (stack.length) {
+          const o = stack.pop()
+          if (o.isMesh) {
+            const g = o.geometry
+            if (g && !g.boundingSphere) g.computeBoundingSphere()
+            const bs = g ? g.boundingSphere || null : null
+            let nan = false
+            if (g.attributes.position) {
+              const a = g.attributes.position.array
+              for (let i = 0; i < Math.min(a.length, 300); i++) { if (a[i] !== a[i]) { nan = true; break } }
+            }
+            list.push({
+              tris: g.index ? g.index.count / 3 : g.attributes.position.count / 3,
+              bs: bs ? [bs.center.x, bs.center.y, bs.center.z, bs.radius].map((v) => +v.toFixed(2)) : null,
+              nan,
+              frustumCulled: o.frustumCulled
+            })
+          }
+          if (o.children) for (const c of o.children) stack.push(c)
         }
-        if (o.children) for (const c of o.children) stack.push(c)
+        return list
       }
+      out.player = scan(player.mesh)
       const fr = new THREE.Frustum().setFromProjectionMatrix(new THREE.Matrix4().multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse))
-      return {
-        camPos: camera.position.toArray().map((v) => Math.round(v)),
-        look: camera.getWorldDirection(new THREE.Vector3()).toArray().map((v) => +v.toFixed(2)),
-        bbIntersects: fr.intersectsBox(bb),
-        bb: [bb.min.x, bb.min.y, bb.min.z, bb.max.x, bb.max.y, bb.max.z].map((v) => Math.round(v)),
-        worldPos: player.mesh.getWorldPosition(new THREE.Vector3()).toArray().map((v) => Math.round(v)),
-        totalTris: tris,
-        totalMeshes: total,
-        rendererInfo: renderer ? { tris: renderer.info.render.triangles, calls: renderer.info.render.calls } : null
+      const bb = new THREE.Box3().setFromObject(player.mesh)
+      out.frustumHasPlayer = fr.intersectsBox(bb)
+      out.camera = { x: +camera.position.x.toFixed(0), y: +camera.position.y.toFixed(0), z: +camera.position.z.toFixed(0) }
+      out.playerWorld = { x: +player.mesh.position.x.toFixed(0), y: +player.mesh.position.y.toFixed(0), z: +player.mesh.position.z.toFixed(0) }
+      out.rendererCalls = renderer.info.render.calls
+      out.rendererTris = renderer.info.render.triangles
+      out.frameNo = state.frameNo
+      out.night = state.isNight
+      out.rendererState = {
+        clear: renderer.getClearColor(new THREE.Color()).getHexString(),
+        bg: scene.background ? '#' + scene.background.getHexString() : null,
+        fog: scene.fog ? '#' + scene.fog.color.getHexString() : null,
+        fogNear: scene.fog ? scene.fog.near : null,
+        fogFar: scene.fog ? scene.fog.far : null,
+        toneMapping: renderer.toneMapping,
+        hemi: hemi.intensity,
+        dir: dirLight.intensity,
+        dirShadow: dirLight.castShadow
       }
+      const v = new THREE.Vector3(0, 8, 0)
+      player.mesh.localToWorld(v)
+      v.project(camera)
+      out.playerNdc = [v.x, v.y, v.z].map((n) => +n.toFixed(3))
+      return out
     },
     rideEnd: null,
     testPaint: (on) => {
@@ -1785,19 +2297,101 @@ async function boot() {
       while (stack.length) {
         const o = stack.pop()
         if (o.isMesh && o.material) {
-          const m = Array.isArray(o.material) ? o.material : [o.material]
-          for (const mat of m) {
-            if (on) {
-              mat.emissive = new THREE.Color(0xff00ff)
-              mat.emissiveIntensity = 1
-              mat.map = null
-              mat.color = new THREE.Color(0xff00ff)
-            }
+          const n = Array.isArray(o.material) ? o.material.length : 1
+          if (on) {
+            o.material = Array.from({ length: n }, () => new THREE.MeshBasicMaterial({ color: 0x00ff00 }))
+          } else {
+            o.material = Array.from({ length: n }, () => new THREE.MeshLambertMaterial({ color: 0x00ff00 }))
           }
         }
         if (o.children) for (const c of o.children) stack.push(c)
       }
       return true
+    },
+    testFlat: (mode) => {
+      const m = player.mesh
+      if (!m) return false
+      const stack = [m]
+      while (stack.length) {
+        const o = stack.pop()
+        if (o.isMesh) {
+          const old = o.userData._origMat
+          if (mode === 'flat' && !old) {
+            o.userData._origMat = o.material
+            o.material = new THREE.MeshLambertMaterial({ color: 0xffffff })
+          } else if (mode === 'flatMap' && !old) {
+            o.userData._origMat = o.material
+            o.material = new THREE.MeshLambertMaterial({ map: texSkin() })
+          } else if (mode === 'orig' && old) {
+            o.material = old
+            o.userData._origMat = null
+          }
+        }
+        if (o.children) for (const c of o.children) stack.push(c)
+      }
+      return true
+    },
+    testBox: (on) => {
+      if (on && !window.__boxProbe) {
+        window.__boxProbe = new THREE.Mesh(
+          new THREE.BoxGeometry(6, 6, 6),
+          new THREE.MeshBasicMaterial({ color: 0xff0000 })
+        )
+        window.__boxProbe.matrixAutoUpdate = false
+        window.__boxProbe.position.set(player.mesh.position.x, 10, player.mesh.position.z)
+        window.__boxProbe.updateMatrix()
+        scene.add(window.__boxProbe)
+      } else if (!on && window.__boxProbe) {
+        scene.remove(window.__boxProbe)
+        window.__boxProbe = null
+      }
+      return !!on
+    },
+    setOnlyPed: (on) => {
+      const keep = new Set()
+      if (player.mesh) {
+        keep.add(player.mesh)
+        const st = [player.mesh]
+        while (st.length) {
+          const o = st.pop()
+          keep.add(o)
+          if (o.children) for (const c of o.children) st.push(c)
+        }
+      }
+      const st2 = [scene]
+      while (st2.length) {
+        const o = st2.pop()
+        if (o !== scene && o.isMesh) o.visible = keep.has(o) ? true : !on
+        if (o.children) for (const c of o.children) st2.push(c)
+      }
+      return on
+    },
+    setNight: (on) => {
+      state.isNight = on
+      el('hud-night').style.opacity = on ? 1 : 0
+      hemi.intensity = on ? 0.3 : 0.95
+      dirLight.intensity = on ? 0.25 : 0.9
+      scene.background = new THREE.Color(on ? 0x0a1030 : 0x87b7d8)
+      scene.fog = new THREE.Fog(on ? 0x0a1030 : 0x87b7d8, on ? 140 : 420, on ? 1500 : 3300)
+      return true
+    },
+    testHide: (on) => {
+      let n = 0
+      const stack = [player.mesh]
+      while (stack.length) {
+        const o = stack.pop()
+        if (o.isMesh) { o.visible = !on; n++ }
+        if (o.children) for (const c of o.children) stack.push(c)
+      }
+      for (const p of peds) {
+        const s = [p.mesh]
+        while (s.length) {
+          const o = s.pop()
+          if (o.isMesh) { o.visible = !on; n++ }
+          if (o.children) for (const c of o.children) s.push(c)
+        }
+      }
+      return n
     },
     get rigState() {
       const m = player.mesh

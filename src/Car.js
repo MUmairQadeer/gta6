@@ -9,13 +9,16 @@ const PHYS = {
   OFFROAD_MAX_FACTOR: 0.72,
   ACCEL: 380,
   ACCEL_CURVE: 1.25,
-  BRAKE: 500,
+  BRAKE: 420,
   REVERSE_ACCEL: 140,
-  DRAG_ROAD: 0.5,
-  DRAG_OFFROAD: 2.4,
-  STEER: 2.2,
-  STEER_RESPONSE: 4.2,
-  MIN_STEER_SPEED: 8
+  DRAG_ROAD: 0.45,
+  DRAG_OFFROAD: 2.2,
+STEER: 1.8,
+    STEER_RESPONSE: 4.0,
+    YAW_RESPONSE: 5.0,
+  GRIP_LOW: 2.4,
+  GRIP_HIGH: 5.2,
+  MIN_STEER_SPEED: 10
 }
 
 const PALETTES = [
@@ -196,10 +199,15 @@ export class Car {
     const body = this.sprite.body
     body.setSize(14, 27, 3, 4)
     body.setImmovable(true)
+    body.setBounce(0, 0)
     this.speed = 0
     this.onRoad = true
     this.maxSpeed = PHYS.MAX_SPEED
     this._steer = 0
+    this._yaw = 0
+    this._sgn = 1
+    this._vdx = Math.sin(rotation)
+    this._vdy = -Math.cos(rotation)
   }
 
   updateSurface(scene) {
@@ -216,43 +224,59 @@ export class Car {
 
     const maxSpeed = this.maxSpeed * (this.onRoad ? 1 : PHYS.OFFROAD_MAX_FACTOR)
 
-    // ---- longitudinal: power tapers near top speed, brakes bite, coast holds momentum ----
+    // ---- longitudinal: power tapers to top speed, braking eases off smoothly ----
     let v = this.speed
+    const sp0 = Math.abs(v)
+    const brakeScale = 0.25 + 0.75 * Math.min(1, sp0 / maxSpeed)
     if (up && !down) {
       if (v < -0.5) {
-        v = Math.min(0, v + PHYS.BRAKE * dt)
+        v = Math.min(0, v + PHYS.BRAKE * brakeScale * dt)
       } else {
         v = Math.min(maxSpeed, v + PHYS.ACCEL * Math.pow(Math.max(0, 1 - v / maxSpeed), PHYS.ACCEL_CURVE) * dt)
       }
     } else if (down && !up) {
       if (v > 0.5) {
-        v = Math.max(0, v - PHYS.BRAKE * dt)
+        v = Math.max(0, v - PHYS.BRAKE * brakeScale * dt)
       } else {
         v = Math.max(-PHYS.ACC_REVERSE, v - PHYS.REVERSE_ACCEL * Math.pow(Math.max(0, 1 + v / PHYS.ACC_REVERSE), PHYS.ACCEL_CURVE) * dt)
       }
     } else if (up && down) {
-      v = Math.max(0, v - PHYS.BRAKE * dt)
+      v = Math.max(0, v - PHYS.BRAKE * brakeScale * dt)
     } else {
       const drag = this.onRoad ? PHYS.DRAG_ROAD : PHYS.DRAG_OFFROAD
       v *= Math.exp(-drag * dt)
-      if (Math.abs(v) < 1.5) v = 0
+      if (Math.abs(v) < 1.2) v = 0
     }
 
     v = Phaser.Math.Clamp(v, -PHYS.ACC_REVERSE, maxSpeed)
     this.speed = v
 
-    // ---- steering: smoothed input, speed-shaped authority ----
+    // ---- steering: sharper at low speed, wide at high speed; yaw rate eased, no snap ----
     this._steer += (steerIn - this._steer) * Math.min(1, PHYS.STEER_RESPONSE * dt)
     const sp = Math.abs(v)
     const frac = Math.min(1, sp / maxSpeed)
-    if (sp > PHYS.MIN_STEER_SPEED) {
-      const turn = frac * (1 - 0.32 * frac) * PHYS.STEER
-      this.sprite.rotation += this._steer * turn * dt * (v > 0 ? 1 : -1)
-    }
+    const authority = Math.max(0.45, 1 - 0.5 * frac)
+    const targetYaw = sp > PHYS.MIN_STEER_SPEED ? this._steer * PHYS.STEER * authority * (v > 0 ? 1 : -1) : 0
+    this._yaw += (targetYaw - this._yaw) * Math.min(1, PHYS.YAW_RESPONSE * dt)
+    this.sprite.rotation += this._yaw * dt
 
+    // ---- momentum: motion direction lags heading at speed (subtle drift) ----
     const fx = Math.sin(this.sprite.rotation)
     const fy = -Math.cos(this.sprite.rotation)
-    this.sprite.body.setVelocity(fx * v, fy * v)
+    const sgn = v >= 0 ? 1 : -1
+    const sdx = fx * sgn
+    const sdy = fy * sgn
+    if (this._sgn !== sgn) {
+      this._sgn = sgn
+      this._vdx = sdx
+      this._vdy = sdy
+      this._yaw = 0
+    }
+    const grip = PHYS.GRIP_LOW + (PHYS.GRIP_HIGH - PHYS.GRIP_LOW) * frac
+    this._vdx += (sdx - this._vdx) * Math.min(1, grip * dt)
+    this._vdy += (sdy - this._vdy) * Math.min(1, grip * dt)
+    const vlen = Math.hypot(this._vdx, this._vdy) || 1
+    this.sprite.body.setVelocity((this._vdx / vlen) * v, (this._vdy / vlen) * v)
   }
 
   get speedKmh() {

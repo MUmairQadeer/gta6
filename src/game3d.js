@@ -1,10 +1,11 @@
 import * as THREE from 'three'
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js'
-import { unlockAudio, setEngine, playCrash, playBusted } from './audio.js'
+import { unlockAudio, setEngine, playCrash, playBusted, playHorn } from './audio.js'
 
 const TILE = 16
 const WALK = 280
 const SPRINT = 460
+const TURN_RATE = 10
 const MAX_SPEED = 280
 const DRIVE = {
   REVERSE_MAX: 95,
@@ -49,7 +50,7 @@ let mapW = 0
 let mapH = 0
 
 const player = { x: 0, y: 0, r: 0, mesh: null, moving: false }
-const car = { inCar: false, speed: 0, r: 0, x: 0, y: 0, mesh: null, cur: null, _steer: 0, _yaw: 0, _sgn: 1, _vdx: 0, _vdy: -1 }
+const car = { inCar: false, speed: 0, r: 0, x: 0, y: 0, mesh: null, cur: null, _steer: 0, _yaw: 0, _sgn: 1, _vdx: 0, _vdy: -1, honk: false, _lastHonk: 0 }
 const peds = []
 const cops = []
 
@@ -71,9 +72,14 @@ let minimapCtx = null
 let minimapBg = null
 let camYaw = 0
 let camPitch = 0.55
-let mouseDown = false
-let lastMX = 0
-let lastMY = 0
+let camYawS = 0
+let camPitchS = 0.55
+let camLocked = false
+
+function angLerp(a, b, t) {
+  const d = Math.atan2(Math.sin(b - a), Math.cos(b - a))
+  return a + d * Math.min(1, t)
+}
 let hudTimer = 0
 let miniTimer = 0
 let camTarget = new THREE.Vector3()
@@ -170,7 +176,7 @@ function initHud() {
       <canvas id="hud-mini" width="144" height="144" style="display:block;border-radius:7px"></canvas>
       <div style="font-size:9px;color:#aeb9c4;text-align:center;letter-spacing:2.5px;margin-top:5px">MINIMAP</div>
     </div>
-    <div id="hud-hint" style="position:absolute;bottom:6px;left:50%;transform:translateX(-50%);font-size:12px;color:#d2f0d2;background:rgba(0,0,0,.35);padding:4px 10px;border-radius:6px;white-space:nowrap">WASD/arrows walk · E enter/exit · drag mouse look · SHIFT sprint · scroll zoom · T night</div>
+    <div id="hud-hint" style="position:absolute;bottom:6px;left:50%;transform:translateX(-50%);font-size:12px;color:#d2f0d2;background:rgba(0,0,0,.35);padding:4px 10px;border-radius:6px;white-space:nowrap">click screen to lock mouse · WASD/arrows move · mouse look · E enter/exit · SPACE handbrake · H horn · SHIFT sprint · scroll zoom · T night</div>
     <div id="hud-night" style="position:absolute;inset:0;background:rgba(18,26,90,.42);opacity:0;transition:opacity .5s"></div>
     <div id="hud-busted" style="position:absolute;inset:0;background:rgba(0,0,0,.62);display:none;pointer-events:auto;align-items:center;justify-content:center;flex-direction:column">
       <div style="font-size:44px;font-weight:bold;color:#ff5a4a">BUSTED</div>
@@ -228,7 +234,8 @@ const CAR_MATS = {
   plate: new THREE.MeshBasicMaterial({ color: 0xf4f4f0 }),
   shadow: new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.3, depthWrite: false }),
   sirenR: new THREE.MeshLambertMaterial({ color: 0xff3b30, emissive: 0xff3030, emissiveIntensity: 1.4 }),
-  sirenB: new THREE.MeshLambertMaterial({ color: 0x3661ff, emissive: 0x3661ff, emissiveIntensity: 1.4 })
+  sirenB: new THREE.MeshLambertMaterial({ color: 0x3661ff, emissive: 0x3661ff, emissiveIntensity: 1.4 }),
+  brake: new THREE.MeshLambertMaterial({ color: 0x2a0a06, emissive: 0xff241a, emissiveIntensity: 0.0 })
 }
 
 const paintCache = new Map()
@@ -256,6 +263,7 @@ function makeCarModel(bodyHex, isPolice) {
   const g = new THREE.Group()
   const p = paintMats(bodyHex)
   const M = CAR_MATS
+  const brakeM = M.brake.clone()
   const parts = []
   const push = (geo, mat, px, py, pz, rx = 0, ry = 0, rz = 0) => {
     const m = new THREE.Matrix4()
@@ -337,7 +345,7 @@ function makeCarModel(bodyHex, isPolice) {
     box(3.3, 1.0, 0.5, M.tail, sx * 4.0, 4.0, 13.35) // taillight units
     box(3.6, 0.32, 0.9, M.tail, sx * 4.35, 7.78, 11.3) // lit strips on trunk lip
   }
-  box(9.0, 0.45, 0.3, M.tail, 0, 3.6, 13.55) // full-width brake light
+  box(9.0, 0.45, 0.3, brakeM, 0, 3.6, 13.55) // full-width brake light
   box(9.4, 0.5, 1.1, p.dark, 0, 8.15, 11.2) // ducktail spoiler lip — marks the trunk
   box(6.4, 1.2, 0.5, M.trim, 0, 1.6, 13.45) // rear diffuser
   box(2.4, 1.0, 0.2, M.plate, 0, 3.0, 13.5)
@@ -359,7 +367,11 @@ function makeCarModel(bodyHex, isPolice) {
   }
   for (const [mat, list] of byMat) {
     const merged = mergeGeometries(list.map((part) => part.geo.clone().applyMatrix4(part.m)), false)
-    if (merged) g.add(new THREE.Mesh(merged, mat))
+    if (merged) {
+      const m = new THREE.Mesh(merged, mat)
+      if (mat === brakeM) g.userData.brake = m
+      g.add(m)
+    }
   }
   g.traverse((o) => { if (o.isMesh && o.material !== M.shadow) o.castShadow = true })
   return g
@@ -826,9 +838,15 @@ function buildGround() {
       const x0 = tx * PX
       const y0 = ty * PX
       if (bld === 8) {
-        for (let j = 1; j < PX - 1; j++)
-          for (let k = 1; k < PX - 1; k++)
-            dith(((y0 + j) * W + x0 + k) * 4, -12)
+        const cc = PX / 2 - 0.5
+        for (let j = 0; j < PX; j++) {
+          for (let k = 0; k < PX; k++) {
+            const dx = (k - cc) / cc
+            const dy = (j - cc) / cc
+            const ao = 30 * Math.max(0, 1 - Math.sqrt(dx * dx + dy * dy))
+            if (ao > 2) dith(((y0 + j) * W + x0 + k) * 4, -ao)
+          }
+        }
         continue
       }
       if (bIsB(bld)) continue
@@ -1415,6 +1433,53 @@ function texLeaves() {
   return leafTex
 }
 
+function treeTrunkGeo() {
+  const SEG = 16
+  const ROWS = 7
+  const H = 8.6
+  const topR = 0.55
+  const midR = 1.3
+  const baseR = 2.1
+  const verts = []
+  const uvs = []
+  const idx = []
+  const rAt = (v, a) => {
+    const t = Math.min(1, v / 0.25)
+    const prof = t < 1
+      ? baseR - (baseR - midR) * t
+      : midR - (midR - topR) * ((v - 0.25) / 0.75)
+    const wob = 0.88 + 0.24 * Math.sin(a * 2.3 + v * 4.1) + 0.1 * Math.sin(a * 5.7 + v * 9.3)
+    const toes = v < 0.3 ? 1 + 0.5 * Math.max(0, Math.sin(a * 3 + v * 24)) : 1
+    return prof * wob * toes * 0.92
+  }
+  const mX = (v) => 0.34 * v * v + 0.1 * Math.sin(v * 6.3)
+  const mZ = (v) => 0.16 * v * v * Math.sin(v * 3.7) + 0.06 * Math.sin(v * 11)
+  for (let j = 0; j <= ROWS; j++) {
+    const v = j / ROWS
+    const y = v * H
+    const cx = mX(v)
+    const cz = mZ(v)
+    for (let i = 0; i <= SEG; i++) {
+      const a = (i / SEG) * Math.PI * 2
+      const r = rAt(v, a)
+      verts.push(cx + Math.cos(a) * r, y, cz + Math.sin(a) * r)
+      uvs.push(i / SEG, v)
+    }
+  }
+  for (let j = 0; j < ROWS; j++) {
+    for (let i = 0; i < SEG; i++) {
+      const a = j * (SEG + 1) + i
+      idx.push(a, a + 1, a + SEG + 1, a, a + SEG + 1, a + SEG + 2)
+    }
+  }
+  const g = new THREE.BufferGeometry()
+  g.setAttribute('position', new THREE.Float32BufferAttribute(verts, 3))
+  g.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2))
+  g.setIndex(idx)
+  g.computeVertexNormals()
+  return g
+}
+
 function buildTrees() {
   const list = []
   for (let y = 0; y < mapH; y++) {
@@ -1425,11 +1490,26 @@ function buildTrees() {
   if (!list.length) return
   const bark = texBark()
   const leaf = texLeaves()
-  const trunk = new THREE.InstancedMesh(new THREE.CylinderGeometry(1.0, 2.0, 9, 8, 1), new THREE.MeshLambertMaterial({ map: bark.map, bumpMap: bark.bump, bumpScale: 0.9 }), list.length)
-  const core = new THREE.InstancedMesh(new THREE.IcosahedronGeometry(4.8, 1), new THREE.MeshLambertMaterial({ map: leaf, alphaTest: 0.45, transparent: true }), list.length)
-  const lobeA = new THREE.InstancedMesh(new THREE.IcosahedronGeometry(3.2, 1), new THREE.MeshLambertMaterial({ map: leaf, alphaTest: 0.45, transparent: true }), list.length)
-  const lobeB = new THREE.InstancedMesh(new THREE.IcosahedronGeometry(2.5, 1), new THREE.MeshLambertMaterial({ map: leaf, alphaTest: 0.45, transparent: true }), list.length)
-  for (const m of [trunk, core, lobeA, lobeB]) {
+  const n = list.length
+  const trunkMat = new THREE.MeshLambertMaterial({ map: bark.map, bumpMap: bark.bump, bumpScale: 0.55 })
+  const leafMat = new THREE.MeshLambertMaterial({ map: leaf, alphaTest: 0.45, transparent: true })
+  const trunk = new THREE.InstancedMesh(treeTrunkGeo(), trunkMat, n)
+  const blob = []
+  for (let bi = 0; bi < 2; bi++) {
+    blob.push(new THREE.InstancedMesh(new THREE.IcosahedronGeometry(1.1, 1), new THREE.MeshLambertMaterial({ map: bark.map, bumpMap: bark.bump, bumpScale: 0.4 }), n))
+  }
+  const branch = []
+  for (let bi = 0; bi < 4; bi++) {
+    branch.push(new THREE.InstancedMesh(new THREE.CylinderGeometry(0.17, 0.36, 2.8, 6, 1), trunkMat, n))
+  }
+  const lobeDefs = [
+    { r: 5.0, dark: 0.24, sat: 0.52, hue: 0.28 },
+    { r: 3.3, dark: 0.4, sat: 0.55, hue: 0.24 },
+    { r: 2.9, dark: 0.3, sat: 0.5, hue: 0.31 },
+    { r: 2.3, dark: 0.19, sat: 0.5, hue: 0.34 }
+  ]
+  const lobe = lobeDefs.map((d) => new THREE.InstancedMesh(new THREE.IcosahedronGeometry(d.r, 1), leafMat, n))
+  for (const m of [trunk, ...blob, ...branch, ...lobe]) {
     m.castShadow = true
     m.receiveShadow = true
   }
@@ -1439,6 +1519,8 @@ function buildTrees() {
   const sc = new THREE.Vector3()
   const quat = new THREE.Quaternion()
   const eul = new THREE.Euler()
+  const dir = new THREE.Vector3()
+  const YAXIS = new THREE.Vector3(0, 1, 0)
   list.forEach((it, i) => {
     const v = hue(it.x, it.z, 0.1)
     const h = 0.7 + v * 0.55
@@ -1447,38 +1529,70 @@ function buildTrees() {
     const sq = 0.84 + hue(it.x, it.z, 0.53) * 0.3
     const yaw = hue(it.x, it.z, 0.61) * Math.PI * 2
     const lean = (hue(it.x, it.z, 0.83) - 0.5) * 0.12
-    const cy = h * 9 * 0.46 + 2.8 * cs * sq
+    const tH = h * 4.3
+    const tTop = h * 8.6
     eul.set(lean, yaw, 0)
     quat.setFromEuler(eul)
-    pos.set(it.x, h * 4.5, it.z)
+    pos.set(it.x, tH, it.z)
     sc.set(r, h, r)
     mat.compose(pos, quat, sc)
     trunk.setMatrixAt(i, mat)
-    trunk.setColorAt(i, col.setHSL(0.075, 0.34, 0.2 + v * 0.1))
-    eul.set(0, yaw * 1.3, lean * 1.6)
-    quat.setFromEuler(eul)
-    pos.set(it.x, cy, it.z)
-    sc.set(cs, cs * sq, cs)
-    mat.compose(pos, quat, sc)
-    core.setMatrixAt(i, mat)
-    core.setColorAt(i, col.setHSL(0.27 + (hue(it.x, it.z, 0.9) - 0.5) * 0.09, 0.52 + hue(it.x, it.z, 0.9) * 0.2, 0.26 + hue(it.x, it.z, 0.3) * 0.15))
-    eul.set(0, yaw + 1.9, 0)
-    quat.setFromEuler(eul)
-    pos.set(it.x + Math.sin(yaw) * 2.6, cy + 1.6 + hue(it.x, it.z, 0.31) * 2.4, it.z + Math.cos(yaw) * 2.6)
-    sc.set(cs * 0.62, cs * 0.55 * sq, cs * 0.62)
-    mat.compose(pos, quat, sc)
-    lobeA.setMatrixAt(i, mat)
-    lobeA.setColorAt(i, col.setHSL(0.28 + (hue(it.x, it.z, 0.99) - 0.5) * 0.1, 0.5, 0.34 + hue(it.x, it.z, 0.13) * 0.14))
-    const side = yaw + Math.PI * 0.8
-    eul.set(0, yaw + 3.1, 0)
-    quat.setFromEuler(eul)
-    pos.set(it.x + Math.sin(side) * 3.4, cy - 0.4 + hue(it.x, it.z, 0.47) * 1.4, it.z + Math.cos(side) * 3.4)
-    sc.set(cs * 0.5, cs * 0.45 * sq, cs * 0.5)
-    mat.compose(pos, quat, sc)
-    lobeB.setMatrixAt(i, mat)
-    lobeB.setColorAt(i, col.setHSL(0.29 + (hue(it.x, it.z, 0.17) - 0.5) * 0.08, 0.54, 0.3 + hue(it.x, it.z, 0.59) * 0.12))
+    trunk.setColorAt(i, col.setHSL(0.08, 0.3, 0.3 + v * 0.1))
+    for (let bi = 0; bi < 2; bi++) {
+      const on = hue(it.x, it.z, 0.19 + bi * 0.13)
+      if (on < 0.4) {
+        mat.makeScale(0.0001, 0.0001, 0.0001)
+        blob[bi].setMatrixAt(i, mat)
+      } else {
+        const ba = yaw + bi * 2.2 + on * 1.6
+        pos.set(it.x + Math.cos(ba) * r * (1.5 + on * 0.9), 0.5 + on * 0.45, it.z + Math.sin(ba) * r * (1.5 + on * 0.9))
+        sc.set(r * (1 + on * 0.6), 0.5 + on * 0.3, r * (0.8 + on * 0.4))
+        mat.compose(pos, quat, sc)
+        blob[bi].setMatrixAt(i, mat)
+        blob[bi].setColorAt(i, col.setHSL(0.08, 0.3, 0.24 + v * 0.08))
+      }
+    }
+    const nb = hue(it.x, it.z, 0.67)
+    for (let bi = 0; bi < 4; bi++) {
+      const on = nb - bi * 0.19
+      if (on < 0.12) {
+        mat.makeScale(0.0001, 0.0001, 0.0001)
+        branch[bi].setMatrixAt(i, mat)
+        continue
+      }
+      const ba = yaw + bi * 1.9 + hue(it.x, it.z, 0.21 + bi * 0.11) * 2.2
+      const tilt = 0.5 + hue(it.x, it.z, 0.29 + bi * 0.13) * 0.55
+      const blen = 0.7 + on * 0.85
+      const bthk = 0.6 + hue(it.x, it.z, 0.43 + bi * 0.09) * 0.55
+      const by = tTop - h * (1.2 + hue(it.x, it.z, 0.31 + bi * 0.17) * 1.6)
+      pos.set(it.x + Math.cos(ba) * r * 0.7, by, it.z + Math.sin(ba) * r * 0.7)
+      dir.set(Math.sin(tilt) * Math.cos(ba), Math.cos(tilt), Math.sin(tilt) * Math.sin(ba))
+      quat.setFromUnitVectors(YAXIS, dir)
+      sc.set(bthk * 0.8, blen, bthk * 0.8)
+      mat.compose(pos, quat, sc)
+      branch[bi].setMatrixAt(i, mat)
+      branch[bi].setColorAt(i, col.setHSL(0.08, 0.28, 0.26 + v * 0.09))
+    }
+    const cy = tH + h * 2.2 + 2.6 * cs * sq
+    for (let k = 0; k < 4; k++) {
+      const ph = hue(it.x, it.z, 0.71 + k * 0.09)
+      const d = lobeDefs[k]
+      const aOff = yaw + (k === 0 ? 0 : [1.2, 3.6, 4.9][k - 1]) + (ph - 0.5) * 1.4
+      const radOff = [0, 0.9, 2.2, 2.7][k] * cs
+      const yOff = [0, 1.9, -0.5, -1.5][k] * cs + (ph - 0.5) * 1.6
+      pos.set(it.x + Math.cos(aOff) * radOff, cy + yOff, it.z + Math.sin(aOff) * radOff)
+      const ks = [1, 0.66, 0.58, 0.5][k]
+      const ks2 = 0.94 + ph * 0.12
+      sc.set(cs * ks * ks2, cs * ks * sq * ks2, cs * ks * ks2)
+      eul.set(0, aOff * 1.3, lean * 1.4)
+      quat.setFromEuler(eul)
+      mat.compose(pos, quat, sc)
+      lobe[k].setMatrixAt(i, mat)
+      const lj = (hue(it.x, it.z, 0.4 + k * 0.13) - 0.5) * 0.1
+      lobe[k].setColorAt(i, col.setHSL(d.hue + lj, d.sat, Math.max(0.14, d.dark + lj * 1.5)))
+    }
   })
-  for (const m of [trunk, core, lobeA, lobeB]) {
+  for (const m of [trunk, ...blob, ...branch, ...lobe]) {
     m.instanceMatrix.needsUpdate = true
     if (m.instanceColor) m.instanceColor.needsUpdate = true
     scene.add(m)
@@ -1531,7 +1645,9 @@ function moveCircle(o, r, dx, dy) {
 }
 
 function shifted(r) {
-  return { fx: Math.sin(r), fy: -Math.cos(r) }
+  // heading unit vector (x, z). Mesh models face local -z, so at rotation.y = r the
+  // nose points (-sin r, -cos r) — travel must always equal the nose direction.
+  return { fx: -Math.sin(r), fy: -Math.cos(r) }
 }
 
 function groundAt(x, y) {
@@ -1638,8 +1754,12 @@ function enterCar(c) {
   car._steer = 0
   car._yaw = 0
   car._sgn = 1
-  car._vdx = Math.sin(car.r)
-  car._vdy = -Math.cos(car.r)
+  const { fx, fy } = shifted(car.r)
+  car._vdx = fx
+  car._vdy = fy
+  if (document.pointerLockElement) {
+    try { document.exitPointerLock() } catch { /* ignore */ }
+  }
   player.mesh.visible = false
   el('hud-prompt').style.display = 'none'
   updateHud()
@@ -1663,6 +1783,12 @@ function exitCar() {
   player.mesh.visible = true
   car.inCar = false
   car.speed = 0
+  camYaw = -car.r
+  camYawS = camYaw
+  try {
+    const p = renderer.domElement.requestPointerLock()
+    if (p && typeof p.catch === 'function') p.catch(() => { /* relock may be refused */ })
+  } catch { /* relock may be refused; user can click */ }
 }
 
 function startMission() {
@@ -1721,19 +1847,19 @@ function damage(n) {
 // ---------------------------------------------------------------------------
 function updateMovement(dt) {
   if (car.inCar) return
-  let dx = 0
-  let dy = 0
-  if (keys.has('a') || keys.has('arrowleft')) dx -= 1
-  if (keys.has('d') || keys.has('arrowright')) dx += 1
-  if (keys.has('w') || keys.has('arrowup')) dy -= 1
-  if (keys.has('s') || keys.has('arrowdown')) dy += 1
+  let ax = (keys.has('d') || keys.has('arrowright') ? 1 : 0) - (keys.has('a') || keys.has('arrowleft') ? 1 : 0)
+  let ay = (keys.has('s') || keys.has('arrowdown') ? 1 : 0) - (keys.has('w') || keys.has('arrowup') ? 1 : 0)
   const sp = keys.has('shift') ? SPRINT : WALK
+  const fx = -Math.sin(camYawS)
+  const fy = -Math.cos(camYawS)
+  let dx = -ay * fx - ax * fy
+  let dy = -ay * fy + ax * fx
   const len = Math.hypot(dx, dy)
   player.moving = len > 0
   if (len > 0) {
     dx /= len
     dy /= len
-    player.r = Math.atan2(dx, -dy)
+    player.r = angLerp(player.r, Math.atan2(dx, -dy), Math.min(1, TURN_RATE * dt))
   }
   moveCircle(player, 7, dx * sp * dt, dy * sp * dt)
   player.mesh.position.set(player.x, 0, player.y)
@@ -1749,6 +1875,7 @@ function updateMovement(dt) {
 function updateDrive(dt) {
   const throttle = keys.has('arrowup') || keys.has('w') ? 1 : 0
   const back = keys.has('arrowdown') || keys.has('s') ? 1 : 0
+  const handbrake = keys.has(' ')
   const steerIn = (keys.has('arrowleft') || keys.has('a') ? 1 : 0) - (keys.has('arrowright') || keys.has('d') ? 1 : 0)
   const D = DRIVE
 
@@ -1760,7 +1887,10 @@ function updateDrive(dt) {
   let v = car.speed
   const sp0 = Math.abs(v)
   const brakeScale = 0.25 + 0.75 * Math.min(1, sp0 / maxSpeed)
-  if (throttle && !back) {
+  if (handbrake) {
+    // handbrake: strong scrubbing decel regardless of throttle, ~2.5x harder than foot brake
+    v = Math.sign(v) * Math.max(0, sp0 - D.BRAKE * 2.2 * brakeScale * dt)
+  } else if (throttle && !back) {
     if (v < -0.5) v = Math.min(0, v + D.BRAKE * brakeScale * dt)
     else v += D.ACCEL * Math.pow(Math.max(0, 1 - v / maxSpeed), D.ACCEL_CURVE) * dt
   } else if (back && !throttle) {
@@ -1774,6 +1904,18 @@ function updateDrive(dt) {
   }
   v = Math.max(-D.REVERSE_MAX, Math.min(maxSpeed, v))
   car.speed = v
+
+  // ---- brake lights: foot brake, reversing out of forward motion, or handbrake ----
+  const brakeLights = (throttle && back) || (back && sp0 > 0.5) || (handbrake && sp0 > 2)
+  const bmesh = car.cur && car.cur.mesh.userData ? car.cur.mesh.userData.brake : null
+  if (bmesh) {
+    const bm = bmesh.material
+    const target = brakeLights ? 1.9 : 0.0
+    if (bm.emissiveIntensity !== target) {
+      bm.emissiveIntensity = target
+      bm.color.setHex(brakeLights ? 0xff241a : 0x2a0a06)
+    }
+  }
 
   // ---- steering: sharper at low speed, wide arcs at high speed, angular velocity eased ----
   const d = Math.min(1, D.STEER_RESPONSE * dt)
@@ -1796,7 +1938,7 @@ function updateDrive(dt) {
     car._vdy = sdy
     car._yaw = 0
   }
-  const grip = D.GRIP_LOW + (D.GRIP_HIGH - D.GRIP_LOW) * frac
+  const grip = (D.GRIP_LOW + (D.GRIP_HIGH - D.GRIP_LOW) * frac) * (handbrake && sp > 30 ? 0.5 : 1) // handbrake = grip loss, rear slides out
   car._vdx += (sdx - car._vdx) * Math.min(1, grip * dt)
   car._vdy += (sdy - car._vdy) * Math.min(1, grip * dt)
   const vlen = Math.hypot(car._vdx, car._vdy) || 1
@@ -1878,7 +2020,7 @@ function updateCops(dt) {
   const ty = car.inCar ? car.y : player.y
   for (const cop of cops) {
     const d = dist2(cop.x, cop.y, tx, ty)
-    const wantR = Math.atan2(tx - cop.x, -(ty - cop.y))
+    const wantR = Math.atan2(-(tx - cop.x), -(ty - cop.y))
     let dr = wantR - cop.r
     dr = ((dr + Math.PI * 3) % (Math.PI * 2)) - Math.PI
     cop.r += dr * 0.05
@@ -2028,6 +2170,13 @@ function loop() {
   if (car.inCar) {
     updateDrive(dt)
     setEngine(Math.min(1, Math.abs(car.speed) / MAX_SPEED))
+    if (car.honk) {
+      const now = performance.now()
+      if (now - car._lastHonk > 900) {
+        playHorn()
+        car._lastHonk = now
+      }
+    }
   } else {
     setEngine(0)
     updateMovement(dt)
@@ -2049,19 +2198,23 @@ function loop() {
   const ref = car.inCar ? car : player
   const d = state.cameraDist
   if (car.inCar) {
-    const { fx, fy } = shifted(car.r)
     camYaw = -car.r
+    camYawS = camYaw
+    camPitchS = 0.62
+    const { fx, fy } = shifted(car.r)
     camTarget.set(ref.x - fx * d, 0, ref.y - fy * d)
     camTarget.y = d * 0.62
   } else {
+    camYawS = angLerp(camYawS, camYaw, dt * 14)
+    camPitchS += (camPitch - camPitchS) * Math.min(1, dt * 14)
     camTarget.set(
-      ref.x + Math.sin(camYaw) * Math.cos(camPitch) * d,
+      ref.x + Math.sin(camYawS) * Math.cos(camPitchS) * d,
       0,
-      ref.y + Math.cos(camYaw) * Math.cos(camPitch) * d
+      ref.y + Math.cos(camYawS) * Math.cos(camPitchS) * d
     )
-    camTarget.y = d * Math.sin(camPitch)
+    camTarget.y = d * Math.sin(camPitchS)
   }
-  camera.position.lerp(camTarget, 0.07)
+  camera.position.lerp(camTarget, 0.09)
   camera.lookAt(ref.x, 0, ref.y)
   dirLight.position.set(ref.x + 360, 740, ref.y - 240)
   dirLight.target.position.set(ref.x, 0, ref.y)
@@ -2099,6 +2252,11 @@ window.addEventListener('keydown', (e) => {
       }
     }
   }
+  if (k === 'h' && car.inCar) {
+    car.honk = true
+    car._lastHonk = 0
+    playHorn()
+  }
   if (k === 't') {
     state.isNight = !state.isNight
     el('hud-night').style.opacity = state.isNight ? 1 : 0
@@ -2108,25 +2266,20 @@ window.addEventListener('keydown', (e) => {
     scene.fog = new THREE.Fog(state.isNight ? 0x0a1030 : 0x87b7d8, state.isNight ? 140 : 420, state.isNight ? 1500 : 3300)
   }
 })
-window.addEventListener('keyup', (e) => keys.delete(e.key.toLowerCase()))
+window.addEventListener('keyup', (e) => {
+  const k = e.key.toLowerCase()
+  if (k === 'h') car.honk = false
+  keys.delete(k)
+})
 
-window.addEventListener('mousedown', (e) => {
-  if (e.button !== 0) return
-  mouseDown = true
-  lastMX = e.clientX
-  lastMY = e.clientY
-})
 window.addEventListener('mousemove', (e) => {
-  if (!mouseDown || car.inCar) return
-  const dx = e.clientX - lastMX
-  const dy = e.clientY - lastMY
-  lastMX = e.clientX
-  lastMY = e.clientY
-  camYaw -= dx * 0.006
-  camPitch = Math.max(0.12, Math.min(1.45, camPitch + dy * 0.005))
+  if (!camLocked || car.inCar) return
+  camYaw -= e.movementX * 0.0026
+  camPitch = Math.max(0.05, Math.min(1.05, camPitch + e.movementY * 0.0026))
 })
-window.addEventListener('mouseup', () => { mouseDown = false })
-window.addEventListener('mouseleave', () => { mouseDown = false })
+document.addEventListener('pointerlockchange', () => {
+  camLocked = document.pointerLockElement === renderer.domElement
+})
 
 // ---------------------------------------------------------------------------
 // boot
@@ -2184,6 +2337,14 @@ async function boot() {
   renderer.domElement.id = 'gl'
   renderer.domElement.style.cssText = 'position:fixed;inset:0'
   document.body.insertBefore(renderer.domElement, document.body.firstChild)
+  renderer.domElement.addEventListener('click', () => {
+    if (!car.inCar && document.pointerLockElement !== renderer.domElement) {
+      try {
+        const p = renderer.domElement.requestPointerLock()
+        if (p && typeof p.catch === 'function') p.catch(() => { /* ignore */ })
+      } catch { /* ignore */ }
+    }
+  })
 
   buildGround()
   buildCurbs()
@@ -2213,6 +2374,15 @@ async function boot() {
 
   window.__GAME3D = {
     get player() { return { x: Math.round(player.x), y: Math.round(player.y) } },
+    get playerPos() { return { x: +player.x.toFixed(1), y: +player.y.toFixed(1) } },
+    get carR() { return +car.r.toFixed(4) },
+    get playerRot() { return player.mesh ? +player.mesh.rotation.y.toFixed(3) : null },
+    get camYaw() { return +camYaw.toFixed(3) },
+    setCam: (yaw, pitch) => {
+      camYaw = yaw
+      camYawS = yaw
+      if (pitch != null) { camPitch = pitch; camPitchS = pitch }
+    },
     get inCar() { return car.inCar },
     get speed() { return Math.round(car.speed) },
     get money() { return state.money },
@@ -2220,7 +2390,13 @@ async function boot() {
     get health() { return Math.round(state.health) },
     get missionActive() { return state.missionActive },
     get missionTarget() { return state.missionTarget },
+    get brakeLight() {
+      const bm = car.cur && car.cur.mesh.userData ? car.cur.mesh.userData.brake : null
+      return bm ? +bm.material.emissiveIntensity.toFixed(2) : null
+    },
+    get honking() { return car.honk },
     get hudCash() { return el('hud-cash').textContent },
+    get keysNow() { return [...keys].join(',') },
     get hudMed() { return el('med-pct').textContent },
     get hullStars() { return el('hud-stars').textContent },
     enterCar: () => { const c = nearestCar(); if (c) enterCar(c) },
@@ -2416,7 +2592,7 @@ async function boot() {
       }
     },
     circle: (x, y, r) => circleHits(x, y, r),
-    aimRot: (r) => { car.r = r },
+    aimRot: (r) => { car.r = r; const v = shifted(r); car._vdx = v.fx; car._vdy = v.fy },
     carPos: () => ({ x: car.x, y: car.y }),
     ready: true
   }

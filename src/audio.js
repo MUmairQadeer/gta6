@@ -131,6 +131,27 @@ export function playCrash(intensity = 1) {
   } catch (e) {}
 }
 
+export function playHorn(dur = 0.85) {
+  if (!ctx) return
+  try {
+    const t = ctx.currentTime
+    const g = ctx.createGain()
+    g.gain.setValueAtTime(0.0001, t)
+    g.gain.exponentialRampToValueAtTime(0.2, t + 0.025)
+    g.gain.setValueAtTime(0.2, t + dur - 0.12)
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur)
+    g.connect(master)
+    for (const f of [452, 520]) {
+      const o = ctx.createOscillator()
+      o.type = 'triangle'
+      o.frequency.value = f
+      o.connect(g)
+      o.start(t)
+      o.stop(t + dur + 0.02)
+    }
+  } catch (e) {}
+}
+
 export function playBusted() {
   if (!ctx) return
   try {
